@@ -148,18 +148,39 @@ class ReceiptLedger:
         return self._insert_row(row)
 
     def mark_delivered(self, request_id: str, delivered_at: str | None = None) -> int:
-        """Record that every receipt in a request was delivered. Returns rows touched."""
+        """Record that a report was delivered, for accepted receipts of a request.
+
+        Failed rows are never marked delivered. Returns how many rows touched.
+        """
         conn = self._connect()
         try:
             cur = conn.execute(
                 "UPDATE receipts SET delivered_at = ? WHERE request_id = ? "
-                "AND delivered_at IS NULL",
+                "AND status = 'accepted' AND delivered_at IS NULL",
                 (delivered_at or _utc_now(), request_id),
             )
             conn.commit()
             return cur.rowcount
         finally:
             conn.close()
+
+    def summary(self) -> dict[str, int]:
+        """Aggregate counts for a period-less reconciliation."""
+        conn = self._connect()
+        try:
+            accepted = conn.execute(
+                "SELECT COUNT(*) FROM receipts WHERE status = 'accepted'"
+            ).fetchone()[0]
+            failed = conn.execute(
+                "SELECT COUNT(*) FROM receipts WHERE status = 'failed'"
+            ).fetchone()[0]
+            delivered = conn.execute(
+                "SELECT COUNT(*) FROM receipts WHERE delivered_at IS NOT NULL"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return {"accepted": accepted, "failed": failed, "delivered": delivered,
+                "total": accepted + failed}
 
     def count(self) -> int:
         conn = self._connect()

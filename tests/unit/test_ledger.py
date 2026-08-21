@@ -170,3 +170,28 @@ def test_mark_delivered_sets_delivered_at(tmp_path):
     assert lg.by_user(1)[0]["delivered_at"] is None
     lg.mark_delivered("r1")
     assert lg.by_user(1)[0]["delivered_at"] is not None
+
+
+def test_mark_delivered_skips_failed_rows(tmp_path):
+    # A failed receipt must never be recorded as delivered.
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1", request_id="r1"))  # accepted
+    lg.insert_failure("f2", "bad", request_id="r1", user_id=1)
+    lg.mark_delivered("r1")
+    by_status = {r["status"]: r["delivered_at"] for r in lg.all()}
+    assert by_status["accepted"] is not None
+    assert by_status["failed"] is None
+
+
+def test_summary_counts(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1", user_id=1))
+    lg.insert(_entry("f2", user_id=1))
+    lg.insert_failure("f3", "bad", request_id="r9", user_id=1)
+    lg.insert(_entry("f4", user_id=1, request_id="r2"))
+    lg.mark_delivered("r2")
+    s = lg.summary()
+    assert s["accepted"] == 3
+    assert s["failed"] == 1
+    assert s["delivered"] == 1
+    assert s["total"] == 4
