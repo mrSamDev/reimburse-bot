@@ -21,6 +21,24 @@ from app.services.telegram_service import TelegramService
 logger = logging.getLogger(__name__)
 
 
+async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
+    """Periodically run the session maintenance sweep (reclaim + purge)."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            result = await sweeper()
+            if result.get("reclaimed") or result.get("purged"):
+                logger.info("maintenance sweep: %s", result)
+        except Exception:
+            logger.exception("maintenance sweep failed")
+
+
+def _make_post_init(sessions: SessionStore, interval_seconds: float):
+    async def _post_init(application) -> None:
+        application.create_task(_maintenance_loop(sessions.sweep, interval_seconds))
+    return _post_init
+
+
 def build_application(
     config: Config,
     sessions: SessionStore | None = None,
@@ -105,6 +123,7 @@ def main() -> None:
         logger.warning("backup skipped: %s", exc)
 
     application = build_application(config, sessions=sessions, ledger=ledger)
+    application.post_init = _make_post_init(sessions, config.maintenance_interval_seconds)
     application.run_polling(drop_pending_updates=True)
 
 

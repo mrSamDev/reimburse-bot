@@ -51,6 +51,7 @@ class Config(BaseModel):
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
     session_lease_ttl_seconds: int = 120
+    maintenance_interval_seconds: int = 60
     log_level: str = "INFO"
     log_format: str = "text"
     report_title: str = "Heading Travel Expenses"
@@ -131,6 +132,13 @@ class Config(BaseModel):
             raise ValueError("ai_per_receipt_timeout_seconds must be >= 1")
         return v
 
+    @field_validator("maintenance_interval_seconds")
+    @classmethod
+    def _check_maintenance_interval(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("maintenance_interval_seconds must be >= 1")
+        return v
+
     @field_validator("max_processing_seconds")
     @classmethod
     def _check_budget(cls, v: float) -> float:
@@ -209,6 +217,7 @@ def _from_env() -> dict[str, Any]:
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
         "session_lease_ttl_seconds": int(get("SESSION_LEASE_TTL_SECONDS", "120")),
+        "maintenance_interval_seconds": int(get("MAINTENANCE_INTERVAL_SECONDS", "60")),
         "log_level": get("LOG_LEVEL", "INFO"),
         "log_format": get("LOG_FORMAT", "text"),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),

@@ -66,6 +66,7 @@ python -m app.main         # start long polling
 | `AI_CONCURRENCY` | Max receipts extracted in parallel (default 2) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 300) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
+| `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |
 | `AI_PER_RECEIPT_TIMEOUT_SECONDS` | Hard per-receipt processing timeout (default 120) |
 | `LOG_FORMAT` | `text` or `json` structured logs (default `text`) |
 | `BACKUP_DIR` | Directory for durable DB backups (default `backups/`) |

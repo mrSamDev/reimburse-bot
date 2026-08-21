@@ -1,6 +1,9 @@
 """Tests for the Session model and SQLite-backed SessionStore."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from app.bot.states import BotState
 from app.models.session import Session
@@ -227,6 +230,49 @@ async def test_is_processing_reflects_lease(tmp_path):
     assert await store.is_processing(1) is True
     await store.release_processing(1)
     assert await store.is_processing(1) is False
+
+
+async def test_sweep_reclaims_stale_lease(tmp_path):
+    store = _store(tmp_path)
+    await store.try_acquire_processing(1)
+    _force_lease_expiry(tmp_path, 1)  # crashed-generation lease now expired
+    res = await store.sweep()
+    assert res["reclaimed"] >= 1
+    # After sweep the abandoned slot is re-acquirable.
+    assert await store.try_acquire_processing(1) is True
+
+
+async def test_sweep_purges_expired_sessions(tmp_path):
+    store = _store(tmp_path, ttl_seconds=30)
+    past = datetime.now(timezone.utc) - timedelta(seconds=31)
+    await store.save(Session(user_id=1, chat_id=1, updated_at=past, created_at=past))
+    await store.save(Session(user_id=2, chat_id=2))
+    res = await store.sweep()
+    assert res["purged"] == 1
+    assert await store.count() == 1
+
+
+async def test_sweep_does_not_reclaim_live_lease(tmp_path):
+    store = _store(tmp_path)
+    await store.try_acquire_processing(1)
+    res = await store.sweep()
+    assert res["reclaimed"] == 0
+    assert await store.try_acquire_processing(1) is False  # still held
+
+
+async def test_maintenance_loop_runs_sweep(tmp_path):
+    from app.main import _maintenance_loop
+
+    store = _store(tmp_path)
+    await store.try_acquire_processing(1)
+    _force_lease_expiry(tmp_path, 1)
+    task = asyncio.create_task(_maintenance_loop(store.sweep, 0.01))
+    await asyncio.sleep(0.06)  # let several iterations run
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The abandoned lease was reclaimed by the background loop.
+    assert await store.try_acquire_processing(1) is True
 
 
 

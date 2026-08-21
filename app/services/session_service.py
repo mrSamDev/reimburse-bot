@@ -196,6 +196,40 @@ class SessionStore:
             conn.close()
         return removed
 
+    async def sweep(self) -> dict[str, int]:
+        """Reclaim abandoned leases and purge expired sessions in one maintenance pass.
+
+        Returns ``{"reclaimed": ..., "purged": ...}``.
+        """
+        conn = self._connect()
+        now_iso = _utc_now()
+        try:
+            reclaimed = self._reclaim_expired_leases(conn, now_iso)
+            conn.commit()
+        finally:
+            conn.close()
+        purged = await self.purge_expired()
+        return {"reclaimed": reclaimed, "purged": purged}
+
+    def _reclaim_expired_leases(
+        self, conn: sqlite3.Connection, now_iso: str, user_id: int | None = None
+    ) -> int:
+        """Reset any abandoned (already-expired) processing lease."""
+        if user_id is None:
+            cur = conn.execute(
+                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
+                "WHERE processing = 1 AND lease_expiry IS NOT NULL AND lease_expiry < ?",
+                (now_iso,),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
+                "WHERE user_id = ? AND processing = 1 "
+                "AND lease_expiry IS NOT NULL AND lease_expiry < ?",
+                (user_id, now_iso),
+            )
+        return cur.rowcount
+
     async def try_acquire_processing(self, user_id: int) -> bool:
         """Atomically claim the per-user processing slot across processes.
 
@@ -213,12 +247,7 @@ class SessionStore:
                 (user_id, user_id, BotState.IDLE.value, json.dumps([]), lease, lease),
             )
             # Reclaim an abandoned (already-expired) lease from a crashed generation.
-            conn.execute(
-                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
-                "WHERE user_id = ? AND processing = 1 "
-                "AND lease_expiry IS NOT NULL AND lease_expiry < ?",
-                (user_id, lease),
-            )
+            self._reclaim_expired_leases(conn, lease, user_id)
             cur = conn.execute(
                 "UPDATE sessions SET processing = 1, lease_expiry = ? "
                 "WHERE user_id = ? AND processing = 0",
