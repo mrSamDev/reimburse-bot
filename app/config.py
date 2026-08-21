@@ -41,6 +41,8 @@ class Config(BaseModel):
     max_file_size_mb: int = 10
     temp_dir: Path = PROJECT_ROOT / "temp"
     ai_timeout_seconds: int = 60
+    ai_retry_attempts: int = 3
+    ai_retry_base_delay: float = 1.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
     log_level: str = "INFO"
@@ -77,6 +79,20 @@ class Config(BaseModel):
     def _check_positive_int(cls, v: int, info: Any) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be a positive integer")
+        return v
+
+    @field_validator("ai_retry_attempts")
+    @classmethod
+    def _check_retry_attempts(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("ai_retry_attempts must be >= 1")
+        return v
+
+    @field_validator("ai_retry_base_delay")
+    @classmethod
+    def _check_retry_delay(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("ai_retry_base_delay must be >= 0")
         return v
 
     @field_validator("temp_dir", mode="before")
@@ -136,6 +152,8 @@ def _from_env() -> dict[str, Any]:
         "max_file_size_mb": int(get("MAX_FILE_SIZE_MB", "10")),
         "temp_dir": Path(get("TEMP_DIR", str(PROJECT_ROOT / "temp"))),
         "ai_timeout_seconds": int(get("AI_TIMEOUT_SECONDS", "60")),
+        "ai_retry_attempts": int(get("AI_RETRY_ATTEMPTS", "3")),
+        "ai_retry_base_delay": float(get("AI_RETRY_BASE_DELAY", "1.0")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
         "log_level": get("LOG_LEVEL", "INFO"),

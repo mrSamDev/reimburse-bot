@@ -56,6 +56,7 @@ def _config(tmp: Path, max_receipts: int = 20) -> Config:
     return Config(
         ai_provider="openai", openai_api_key="x", temp_dir=tmp, max_receipts=max_receipts,
         report_title="Heading Travel Expenses", report_period="July Expenses",
+        ai_retry_base_delay=0,  # keep integration tests fast (no real backoff sleeps)
     )
 
 
@@ -87,10 +88,16 @@ async def test_full_pipeline_success(tmp_path):
 
 async def test_single_failing_receipt_does_not_destroy_batch(tmp_path):
     cfg = _config(tmp_path)
-    # First provider call raises; second succeeds.
+    # First provider call raises for every retry attempt; second succeeds.
+    # (3 attempts = max ai_retry_attempts, so the failing receipt gives up.)
     svc = ProcessingService(
         cfg,
-        FakeProvider([AIProviderError("model error"), _ext("Good", "10.00")]),
+        FakeProvider([
+            AIProviderError("model error"),
+            AIProviderError("model error"),
+            AIProviderError("model error"),
+            _ext("Good", "10.00"),
+        ]),
         FakeTelegram(),
     )
     result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)

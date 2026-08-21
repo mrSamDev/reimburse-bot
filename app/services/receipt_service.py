@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.ai.base import AIProviderError, ReceiptVisionProvider
+from app.ai.base import AIProviderError, ReceiptExtraction, ReceiptVisionProvider
 from app.ai.validation import AIValidationError, validate_extraction
 from app.config import Config
 from app.models.receipt import Batch, Receipt
@@ -62,6 +62,29 @@ def make_request_base(temp_root: str | Path, request_id: str) -> Path:
 def _pdf_filename(request_id: str) -> str:
     date = datetime.now(timezone.utc).strftime("%Y%m%d")
     return f"reimbursement_{date}_{request_id}.pdf"
+
+
+async def _extract_with_retry(
+    provider: ReceiptVisionProvider,
+    image_path: str | Path,
+    *,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+) -> ReceiptExtraction:
+    """Extract a receipt, retrying transient provider failures with backoff.
+
+    Only retries :class:`AIProviderError` (transport/parse failures that may be
+    transient). Validation errors are not retried because the AI already
+    returned data that failed hard checks. Raises after ``max_attempts``.
+    """
+    for attempt in range(max_attempts):
+        try:
+            return await asyncio.to_thread(provider.extract_receipt, image_path)
+        except AIProviderError:
+            if attempt == max_attempts - 1:
+                raise
+            await asyncio.sleep(base_delay * (attempt + 1))
+    raise AIProviderError("unreachable")  # pragma: no cover
 
 
 class ProcessingService:
@@ -171,8 +194,11 @@ class ProcessingService:
                 raw_path, max_size_mb=self._config.max_file_size_mb
             )
             await asyncio.to_thread(images.normalize_image, raw_path, norm_path)
-            extraction = await asyncio.to_thread(
-                self._provider.extract_receipt, norm_path
+            extraction = await _extract_with_retry(
+                self._provider,
+                norm_path,
+                max_attempts=self._config.ai_retry_attempts,
+                base_delay=self._config.ai_retry_base_delay,
             )
             receipt = validate_extraction(extraction, file_id)
             return _ReceiptOutcome(receipt=receipt)

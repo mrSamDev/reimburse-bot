@@ -1,0 +1,65 @@
+"""Tests for transient AI failure retry/backoff."""
+
+import asyncio
+
+import pytest
+
+from app.ai.base import AIProviderError, ReceiptExtraction
+from app.services.receipt_service import _extract_with_retry
+
+
+class _FlakyProvider:
+    """Fails on the first `fail_for` calls, then succeeds."""
+
+    def __init__(self, fail_for=1, exc=AIProviderError("boom")):
+        self.fail_for = fail_for
+        self.exc = exc
+        self.calls = 0
+
+    def extract_receipt(self, image_path):
+        self.calls += 1
+        if self.calls <= self.fail_for:
+            raise self.exc
+        return ReceiptExtraction(merchant_name="M", total="10")
+
+
+def test_retries_then_succeeds(monkeypatch):
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = _FlakyProvider(fail_for=2)
+    result = asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=3, base_delay=0.1))
+    assert provider.calls == 3
+    assert result.merchant_name == "M"
+    assert len(sleeps) == 2  # backoff between retries
+
+
+def test_no_retry_needed_when_first_call_succeeds(monkeypatch):
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = _FlakyProvider(fail_for=0)
+    asyncio.run(_extract_with_retry(provider, "/img.jpg"))
+    assert provider.calls == 1
+    assert sleeps == []
+
+
+def test_exhausts_attempts_and_raises(monkeypatch):
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = _FlakyProvider(fail_for=99)
+    with pytest.raises(AIProviderError):
+        asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=3, base_delay=0.1))
+    assert provider.calls == 3
+    assert sleeps == [0.1, 0.2]  # increasing backoff, then give up
+
+
+def test_single_attempt_does_not_retry():
+    provider = _FlakyProvider(fail_for=1)
+    with pytest.raises(AIProviderError):
+        asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=1, base_delay=0))
+    assert provider.calls == 1
