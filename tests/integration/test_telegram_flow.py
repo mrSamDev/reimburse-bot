@@ -113,7 +113,7 @@ def _build(tmp_path, allowed="111", password="secret"):
     transport = FakeTransport()
     telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
     security = SecurityService(config)
-    sessions = SessionStore()
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
@@ -132,11 +132,11 @@ async def test_full_authorized_flow(tmp_path):
     bot, transport, sessions = _build(tmp_path)
 
     await bot.start_command(_text_update("/start"), None)
-    assert sessions.get(111).state == BotState.IDLE
+    assert (await sessions.get(111)).state == BotState.IDLE
 
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f2"), None)
-    session = sessions.get(111)
+    session = await sessions.get(111)
     assert session.state == BotState.COLLECTING
     assert session.receipt_file_ids == ["f1", "f2"]
 
@@ -146,7 +146,7 @@ async def test_full_authorized_flow(tmp_path):
 
     gen_msg = FakeMessage("/generate")
     await bot.generate_command(FakeUpdate(gen_msg), None)
-    assert sessions.get(111).state == BotState.AWAITING_PASSWORD
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
     assert "password" in gen_msg.replies[-1].lower()
 
     await bot.message_handler(_text_update("secret"), None)
@@ -154,7 +154,7 @@ async def test_full_authorized_flow(tmp_path):
     caption = transport.sent_docs[0]
     assert "Receipts: 2" in caption
     assert "AED Total: 107.00" in caption
-    session = sessions.get(111)
+    session = await sessions.get(111)
     assert session.state == BotState.IDLE
     assert session.receipt_file_ids == []
     leftovers = [p for p in Path(tmp_path).iterdir() if p.name.startswith("request_")]
@@ -174,9 +174,9 @@ async def test_wrong_password_returns_to_idle(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     gen_msg = FakeMessage("/generate")
     await bot.generate_command(FakeUpdate(gen_msg), None)
-    assert sessions.get(111).state == BotState.AWAITING_PASSWORD
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
     await bot.message_handler(_text_update("wrongpass"), None)
-    session = sessions.get(111)
+    session = await sessions.get(111)
     assert session.state == BotState.IDLE
     assert transport.sent_docs == []
     # The password message was best-effort deleted.
@@ -189,7 +189,7 @@ async def test_unsupported_document_rejected(tmp_path):
     doc_msg = FakeMessage(document=FakeDocument(mime_type="application/pdf"))
     update = FakeUpdate(doc_msg)
     await bot.message_handler(update, None)
-    assert sessions.get(111).receipt_file_ids == []
+    assert (await sessions.get(111)).receipt_file_ids == []
     assert doc_msg.replies and "image" in doc_msg.replies[-1].lower()
 
 
@@ -198,7 +198,7 @@ async def test_duplicate_receipt_not_staged(tmp_path):
     await bot.start_command(_text_update("/start"), None)
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f1"), None)
-    assert sessions.get(111).receipt_file_ids == ["f1"]
+    assert (await sessions.get(111)).receipt_file_ids == ["f1"]
 
 
 async def test_report_caption_surfaces_failed_receipts(tmp_path):
@@ -215,13 +215,13 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
     config = Config(
         telegram_token="t", allowed_user_ids="111", bot_password="secret",
         ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, ai_retry_base_delay=0,
+        max_receipts=20, ai_retry_base_delay=0, ai_concurrency=1,
         report_title="Heading Travel Expenses", report_period="July Expenses",
     )
     transport = FakeTransport()
     telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
     security = SecurityService(config)
-    sessions = SessionStore()
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
     provider = _FailOnceProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
@@ -261,7 +261,7 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
     transport = _FailingSend()
     telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
     security = SecurityService(config)
-    sessions = SessionStore()
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)

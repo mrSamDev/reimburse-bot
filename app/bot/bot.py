@@ -69,9 +69,9 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, _ = auth
-        session = self.sessions.set_chat_id(user.id, update.effective_chat.id)
+        await self.sessions.set_chat_id(user.id, update.effective_chat.id)
         state, reply = handle_start()
-        session.state = state
+        await self.sessions.set_state(user.id, state)
         await self._reply(update, reply)
 
     async def help_command(self, update, context) -> None:
@@ -85,7 +85,7 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, _ = self._authorized(update)
-        session = self.sessions.get(user.id)
+        session = await self.sessions.get(user.id)
         await self._reply(update, handle_status(session)[1])
 
     async def clear_command(self, update, context) -> None:
@@ -93,9 +93,10 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, _ = self._authorized(update)
-        session = self.sessions.get(user.id)
-        state, reply = handle_clear(session)
+        session = await self.sessions.get(user.id)
+        state, reply = handle_clear(session)  # clears receipts on the detached copy
         session.state = state
+        await self.sessions.save(session)
         await self._reply(update, reply)
 
     async def cancel_command(self, update, context) -> None:
@@ -103,9 +104,10 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, _ = self._authorized(update)
-        session = self.sessions.get(user.id)
+        session = await self.sessions.get(user.id)
         state, reply = handle_cancel(session)
         session.state = state
+        await self.sessions.save(session)
         await self._reply(update, reply)
 
     async def generate_command(self, update, context) -> None:
@@ -114,16 +116,17 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, chat = auth
-        session = self.sessions.get(user.id)
+        session = await self.sessions.get(user.id)
         session.chat_id = chat.id
-        processing = session.processing or self.locks.get(user.id).locked()
+        processing = session.processing or bool(self.locks.get(user.id).locked())
         state, reply = handle_generate(
             session, has_password=self.security.has_password, processing=processing
         )
-        if reply:
-            await self._reply(update, reply)
         if state is not None:
             session.state = state
+        await self.sessions.save(session)
+        if reply:
+            await self._reply(update, reply)
 
     # ---- message handling ----------------------------------------------------
     async def message_handler(self, update, context) -> None:
@@ -132,7 +135,7 @@ class ReimbursementBot:
             await self._reply(update, msg.UNAUTHORIZED)
             return
         user, chat = auth
-        session = self.sessions.get(user.id)
+        session = await self.sessions.get(user.id)
         session.chat_id = chat.id
 
         if session.state == BotState.AWAITING_PASSWORD:
@@ -142,6 +145,7 @@ class ReimbursementBot:
         # Otherwise it's a receipt upload (photo or image document).
         file_id, mime, is_image = self._extract_file(update)
         if file_id is None:
+            await self.sessions.save(session)  # persist chat_id
             await self._reply(update, msg.UNSUPPORTED_DOCUMENT)
             return
         state, reply, should_add = handle_receipt(
@@ -156,6 +160,7 @@ class ReimbursementBot:
             session.state = state
         if should_add:
             session.add_file_id(file_id)
+        await self.sessions.save(session)
         if reply:
             await self._reply(update, reply)
 
@@ -184,6 +189,7 @@ class ReimbursementBot:
             await self.telegram.delete_message(session.chat_id, update.effective_message.message_id)
         if not correct:
             session.state = new_state
+            await self.sessions.save(session)
             if reply:
                 await self._reply(update, reply)
             return
@@ -192,48 +198,57 @@ class ReimbursementBot:
         await self._run_generation(update, session)
 
     async def _run_generation(self, update, session) -> None:
-        acquired = await self.locks.acquire(session.user_id)
-        if not acquired:
+        # In-process fast path first, then an atomic cross-process DB claim.
+        if not await self.locks.acquire(session.user_id):
             await self._reply(update, msg.BUSY)
             session.state = BotState.IDLE
+            await self.sessions.save(session)
             return
-        session.processing = True
+        if not await self.sessions.try_acquire_processing(session.user_id):
+            self.locks.release(session.user_id)
+            await self._reply(update, msg.BUSY)
+            session.state = BotState.IDLE
+            await self.sessions.save(session)
+            return
         # One id for the whole generation so every log line — including the
         # catch-all below — is attributable to the same request.
         request_id = uuid.uuid4().hex[:6]
-        with request_scope(request_id):
-            try:
-                async def deliver(result):
-                    caption = self._report_caption(result)
-                    await self.telegram.send_document(
-                        session.chat_id, result.out_pdf_path, caption=caption
-                    )
-                    await self.processing.mark_delivered(request_id)
+        try:
+            with request_scope(request_id):
+                try:
+                    async def deliver(result):
+                        caption = self._report_caption(result)
+                        await self.telegram.send_document(
+                            session.chat_id, result.out_pdf_path, caption=caption
+                        )
+                        await self.processing.mark_delivered(request_id)
 
-                await run_with_cleanup(
-                    self.processing,
-                    session.user_id,
-                    list(session.receipt_file_ids),
-                    self.config.temp_dir,
-                    deliver=deliver,
-                    request_id=request_id,
-                )
-                session.state = BotState.IDLE
-            except ProcessingError:
-                await self._reply(
-                    update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
-                )
-                session.state = BotState.IDLE
-            except Exception:
-                logger.exception("unhandled processing error")
-                await self._reply(
-                    update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
-                )
-                session.state = BotState.IDLE
-            finally:
-                self.locks.release(session.user_id)
-                session.processing = False
-                session.clear_receipts()
+                    await run_with_cleanup(
+                        self.processing,
+                        session.user_id,
+                        list(session.receipt_file_ids),
+                        self.config.temp_dir,
+                        deliver=deliver,
+                        request_id=request_id,
+                    )
+                    session.state = BotState.IDLE
+                except ProcessingError:
+                    await self._reply(
+                        update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
+                    )
+                    session.state = BotState.IDLE
+                except Exception:
+                    logger.exception("unhandled processing error")
+                    await self._reply(
+                        update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
+                    )
+                    session.state = BotState.IDLE
+        finally:
+            self.locks.release(session.user_id)
+            await self.sessions.release_processing(session.user_id)
+            session.processing = False
+            session.clear_receipts()
+            await self.sessions.save(session)
 
     def _candidate_text(self, update) -> str:
         m = update.message

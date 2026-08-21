@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from dotenv import load_dotenv
@@ -20,10 +21,14 @@ from app.services.telegram_service import TelegramService
 logger = logging.getLogger(__name__)
 
 
-def build_application(config: Config) -> Application:
+def build_application(config: Config, sessions: SessionStore | None = None) -> Application:
     """Assemble the PTB application from a validated config."""
     security = SecurityService(config)
-    sessions = SessionStore(ttl_seconds=config.session_ttl_seconds)
+    if sessions is None:
+        sessions = SessionStore(
+            db_path=config.data_dir / "sessions.db",
+            ttl_seconds=config.session_ttl_seconds,
+        )
 
     application = (
         ApplicationBuilder()
@@ -73,7 +78,17 @@ def main() -> None:
     if swept:
         logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)
 
-    application = build_application(config)
+    # Durable session store; purge stale sessions (and any stale processing
+    # lease left by a crashed generation) before polling.
+    sessions = SessionStore(
+        db_path=config.data_dir / "sessions.db",
+        ttl_seconds=config.session_ttl_seconds,
+    )
+    purged = asyncio.run(sessions.purge_expired())
+    if purged:
+        logger.warning("purged %d expired sessions", purged)
+
+    application = build_application(config, sessions=sessions)
     application.run_polling(drop_pending_updates=True)
 
 
