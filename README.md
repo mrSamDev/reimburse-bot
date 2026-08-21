@@ -100,6 +100,10 @@ injected at runtime via `.env` and are never baked into the image.
 pytest                       # full suite (unit + integration, all mocked)
 ```
 
+Runtime dependencies are hash-pinned in `requirements.lock` (generated with
+`pip-compile --generate-hashes`); dev tools (`ruff`, `mypy`, `pip-audit`,
+`pytest`) are installed unpinned in CI / `requirements-dev.txt`.
+
 Integration tests use fakes for Telegram and the AI provider, so the suite runs
 offline.
 

@@ -10,8 +10,8 @@ RUN groupadd --gid 1000 bot && useradd --uid 1000 --gid bot --create-home bot
 WORKDIR /app
 
 # Install dependencies first for better layer caching.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY app ./app
 
