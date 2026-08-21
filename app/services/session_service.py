@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from threading import Lock
 
 from app.models.session import Session
@@ -26,6 +25,11 @@ class SessionStore:
             if session is None:
                 session = Session(user_id=user_id, chat_id=user_id)
                 self._sessions[user_id] = session
+            elif session.is_expired(self._ttl):
+                # Stale session: replace with a fresh one so receipts staged in a
+                # previous session are never accidentally carried forward.
+                session = Session(user_id=user_id, chat_id=user_id)
+                self._sessions[user_id] = session
             return session
 
     def set_chat_id(self, user_id: int, chat_id: int) -> Session:
@@ -46,17 +50,6 @@ class SessionStore:
     def clear(self, user_id: int) -> None:
         with self._lock:
             self._sessions.pop(user_id, None)
-
-    def expire_stale(self, now: datetime | None = None) -> int:
-        """Remove expired sessions, returning how many were removed."""
-        now = now or datetime.now(timezone.utc)
-        removed = 0
-        with self._lock:
-            for uid in list(self._sessions):
-                if self._sessions[uid].is_expired(self._ttl, now=now):
-                    del self._sessions[uid]
-                    removed += 1
-        return removed
 
     def __len__(self) -> int:
         with self._lock:

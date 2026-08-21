@@ -55,22 +55,28 @@ def test_store_clear():
     assert store.get(5).receipt_file_ids == []
 
 
-def test_expiration():
-    store = SessionStore(ttl_seconds=30)
-    s = store.get(5)
-    s.touch()
-    now = datetime.now(timezone.utc)
-    future = now + timedelta(seconds=31)
-    assert s.is_expired(30, now=future)
-    assert store.expire_stale(now=future) >= 1
-
-
 def test_not_expired_within_ttl():
     store = SessionStore(ttl_seconds=60)
     s = store.get(5)
+    s.add_file_id("f1")
     s.touch()
     later = datetime.now(timezone.utc) + timedelta(seconds=10)
     assert not s.is_expired(60, now=later)
+    # Not expired -> get() returns the same live session.
+    assert store.get(5) is s
+    assert store.get(5).receipt_file_ids == ["f1"]
+
+
+def test_expired_session_returns_fresh_emptied_session():
+    store = SessionStore(ttl_seconds=30)
+    store.get(5).add_file_id("f1")
+    now = datetime.now(timezone.utc)
+    store.get_locked(5).updated_at = now - timedelta(seconds=31)
+    fresh = store.get(5)
+    assert fresh.receipt_file_ids == []
+    assert fresh.user_id == 5
+    # The stale one must be gone from the registry.
+    assert store.get(5).updated_at > now - timedelta(seconds=31)
 
 
 def test_touch_updates_updated_at():
