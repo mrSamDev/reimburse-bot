@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -257,22 +258,21 @@ class ProcessingService:
             logger.info(
                 "processing started: user=%s receipts=%d", user_id, len(file_ids)
             )
+            batch_start = time.monotonic()
             loop = asyncio.get_running_loop()
             budget = self._config.max_processing_seconds
             deadline = (loop.time() + budget) if budget > 0 else None
             call_budget = _CallBudget(max_calls=self._config.ai_max_calls_per_run)
 
             def _check_deadline() -> None:
-                # Soft total-time check: enforced after the concurrent phase, before
-                # the ordered phase and PDF generation (not per-receipt).
+                # Soft total-time check: after the concurrent phase, before PDF.
                 if deadline is not None and loop.time() > deadline:
                     raise ProcessingError(
                         f"Processing time limit ({budget}s) exceeded"
                     )
 
             try:
-                # Phase 1: extract all receipts concurrently, capped by a per-request
-                # semaphore so a batch of N never over-saturates the AI provider.
+                # Phase 1: extract all receipts concurrently, semaphore-capped.
                 sem = asyncio.Semaphore(self._config.ai_concurrency)
 
                 async def _limited(file_id, idx):
@@ -374,6 +374,7 @@ class ProcessingService:
                     "Something went wrong while processing your receipts"
                 ) from exc
 
+            metrics.observe("batch_processing_seconds", time.monotonic() - batch_start)
             return ProcessingResult(
                 batch=batch,
                 out_pdf_path=out_pdf,
@@ -396,9 +397,9 @@ class ProcessingService:
         raw_path = input_dir / f"receipt_{idx:03d}.img"
         norm_path = normalized_dir / f"receipt_{idx:03d}.jpg"
         timeout = self._config.ai_per_receipt_timeout_seconds
-        # Monotonic deadline shared by retry backoff capping and the hard
-        # ``wait_for`` backstop, so a long rate-limit wait cannot exceed it.
+        # Monotonic deadline shared by retry capping and the hard ``wait_for`` backstop.
         deadline = asyncio.get_running_loop().time() + timeout
+        start = time.monotonic()
         try:
             async def _work():
                 await self._telegram.download_file(file_id, raw_path)
@@ -426,12 +427,20 @@ class ProcessingService:
         except BudgetExceededError:
             raise  # whole-batch abort, not a per-receipt failure
         except (asyncio.TimeoutError, TimeoutError):
+            metrics.inc("timeout")
             return _ReceiptOutcome(failed=True, reason="timeout")
         except RECEIPT_FAILURE_EXCEPTIONS as exc:
+            if isinstance(exc, (AIValidationError, file_validation.FileValidationError)):
+                metrics.inc("validation_error")
+            else:
+                metrics.inc("ai_error")
             return _ReceiptOutcome(failed=True, reason=str(exc))
         except Exception as exc:  # isolate this receipt, keep the batch alive
+            metrics.inc("unexpected")
             logger.exception("unexpected error on receipt %s", file_id)
             return _ReceiptOutcome(failed=True, reason=f"unexpected: {exc}")
+        finally:
+            metrics.observe("receipt_processing_seconds", time.monotonic() - start)
 
 
 async def run_with_cleanup(

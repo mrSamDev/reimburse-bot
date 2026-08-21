@@ -426,3 +426,34 @@ async def test_pipeline_increments_metrics(tmp_path):
     m = metrics.get_metrics()
     assert m["processed"] == 1
     assert m["ai_calls"] >= 1
+
+
+async def test_metrics_record_durations_and_error_classes(tmp_path):
+    """The pipeline must record per-receipt duration, batch duration, and
+    error-class counters so /metrics surfaces processing health."""
+    from app.utils import metrics
+
+    cfg = _config(tmp_path)
+    metrics.reset_metrics()
+
+    class _ClassifyingProvider:
+        def extract_receipt(self, image_path):
+            # Keyed by normalized filename so retries can't shift the classification.
+            if "receipt_000" in str(image_path):   # f1 -> success
+                return _ext("A", "53.50")
+            if "receipt_001" in str(image_path):   # f2 -> transport failure (all retries)
+                raise AIProviderError("transient")
+            return ReceiptExtraction(merchant_name=None, total=None)  # f3 -> validation reject
+
+    svc = ProcessingService(cfg, _ClassifyingProvider(), FakeTelegram())
+    result = await run_with_cleanup(svc, 1, ["f1", "f2", "f3"], cfg.temp_dir)
+    assert result.processed_count == 1
+    assert result.failed_count == 2
+
+    m = metrics.get_metrics()
+    assert m["ai_error"] == 1, "AI transport failure must be classed as ai_error"
+    assert m["validation_error"] == 1, "hard AI output reject must be validation_error"
+    assert m["receipt_processing_seconds_count"] == 3
+    assert m["receipt_processing_seconds_sum"] > 0
+    assert m["batch_processing_seconds_count"] == 1
+    assert m["batch_processing_seconds_sum"] > 0
