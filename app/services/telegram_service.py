@@ -35,13 +35,19 @@ class TelegramService:
                 f"File exceeds {self._max_bytes // (1024*1024)} MB limit"
             )
         dest = Path(dest_path)
-        await file.download_to_drive(dest, timeout=self._timeout)
+        await file.download_to_drive(
+            dest, read_timeout=self._timeout, write_timeout=self._timeout
+        )
         return dest
 
     async def send_document(self, chat_id: int, doc_path: str | Path, *, caption: str = "") -> None:
         with open(doc_path, "rb") as fh:
             await self._bot.send_document(
-                chat_id, document=fh, caption=caption, timeout=self._timeout
+                chat_id,
+                document=fh,
+                caption=caption,
+                read_timeout=self._timeout,
+                write_timeout=self._timeout,
             )
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:

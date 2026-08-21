@@ -26,7 +26,7 @@ class FakeFile:
     def __init__(self, size=1000):
         self.file_size = size
 
-    async def download_to_drive(self, dest, timeout=None):
+    async def download_to_drive(self, dest, timeout=None, read_timeout=None, write_timeout=None):
         make_valid_image(dest)
 
 
@@ -40,7 +40,7 @@ class FakeTransport:
         self.get_file_calls += 1
         return FakeFile()
 
-    async def send_document(self, chat_id, document=None, caption="", timeout=None):
+    async def send_document(self, chat_id, document=None, caption="", timeout=None, read_timeout=None, write_timeout=None):
         self.sent_docs.append(caption)
 
     async def delete_message(self, chat_id, message_id):
@@ -239,7 +239,7 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
 
 async def test_catch_all_error_log_carries_request_id(tmp_path):
     class _FailingSend(FakeTransport):
-        async def send_document(self, chat_id, document=None, caption="", timeout=None):
+        async def send_document(self, chat_id, document=None, caption="", timeout=None, read_timeout=None, write_timeout=None):
             raise RuntimeError("telegram send exploded")
 
     class _Capture(logging.Handler):

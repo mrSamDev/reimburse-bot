@@ -12,7 +12,7 @@ class _File:
         self.file_size = size
         self._downloaded = False
 
-    async def download_to_drive(self, dest, timeout=None):
+    async def download_to_drive(self, dest, timeout=None, read_timeout=None, write_timeout=None):
         self._downloaded = True
         make_image(dest, "JPEG")
 
@@ -29,7 +29,7 @@ class FakeBot:
             raise RuntimeError("api down")
         return self.file
 
-    async def send_document(self, chat_id, document=None, caption="", timeout=None):
+    async def send_document(self, chat_id, document=None, caption="", timeout=None, read_timeout=None, write_timeout=None):
         if self.send_error:
             raise RuntimeError("send failed")
         self.sent.append(caption)
