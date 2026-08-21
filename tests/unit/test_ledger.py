@@ -1,8 +1,26 @@
 """Tests for the durable receipt audit ledger."""
 
+import sqlite3
 from decimal import Decimal
 
 from app.services.ledger_service import ReceiptLedger
+
+
+def _user_version(db) -> int:
+    conn = sqlite3.connect(str(db))
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _index_names(db) -> set[str]:
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute("PRAGMA index_list('receipts')").fetchall()
+        return {r[1] for r in rows}
+    finally:
+        conn.close()
 
 
 def _entry(file_id="f1", **kw):
@@ -77,3 +95,42 @@ def test_ledger_created_in_nonexistent_dir(tmp_path):
     lg = ReceiptLedger(db)
     lg.insert(_entry("f1"))
     assert lg.count() == 1
+
+
+def test_schema_version_starts_at_1(tmp_path):
+    db = tmp_path / "ledger.db"
+    ReceiptLedger(db)
+    assert _user_version(db) == 1
+
+
+def test_reconstruct_is_idempotent_version(tmp_path):
+    db = tmp_path / "ledger.db"
+    ReceiptLedger(db)
+    ReceiptLedger(db)
+    assert _user_version(db) == 1
+
+
+def test_indexes_created_for_common_queries(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1"))
+    names = _index_names(tmp_path / "ledger.db")
+    assert "idx_receipts_user_id" in names
+    assert "idx_receipts_request_id" in names
+
+
+def test_future_migration_applies_once(tmp_path, monkeypatch):
+    from app.services import ledger_service as mod
+
+    db = tmp_path / "ledger.db"
+    ReceiptLedger(db)  # applies v1
+    # Simulate a future release bumping the schema to v2 (adds a column).
+    monkeypatch.setattr(mod, "_SCHEMA_VERSION", 2)
+    monkeypatch.setattr(
+        mod,
+        "_MIGRATIONS",
+        {1: mod._MIGRATIONS[1], 2: "ALTER TABLE receipts ADD COLUMN region TEXT;"},
+    )
+    ReceiptLedger(db)  # fresh instance must apply v2
+    assert _user_version(db) == 2
+    ReceiptLedger(db)  # and must not re-apply it
+    assert _user_version(db) == 2

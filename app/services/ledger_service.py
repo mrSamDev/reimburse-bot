@@ -8,21 +8,29 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS receipts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    file_id TEXT UNIQUE,
-    merchant_name TEXT NOT NULL,
-    transaction_date TEXT,
-    currency TEXT NOT NULL,
-    total TEXT NOT NULL,
-    review_required INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'accepted',
-    request_id TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-"""
+_SCHEMA_VERSION = 1
+
+# Ordered migrations keyed by target schema version. ``v1`` creates the table
+# and the indexes used by common audit queries.
+_MIGRATIONS: dict[int, str] = {
+    1: """
+    CREATE TABLE IF NOT EXISTS receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        file_id TEXT UNIQUE,
+        merchant_name TEXT NOT NULL,
+        transaction_date TEXT,
+        currency TEXT NOT NULL,
+        total TEXT NOT NULL,
+        review_required INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'accepted',
+        request_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_receipts_user_id ON receipts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_receipts_request_id ON receipts(request_id);
+    """,
+}
 
 
 def _utc_now() -> str:
@@ -43,9 +51,21 @@ class ReceiptLedger:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring the schema up to ``_SCHEMA_VERSION`` via ``PRAGMA user_version``.
+
+        Applies each missing migration exactly once; re-construction is a no-op.
+        """
         conn = self._connect()
         try:
-            conn.execute(_SCHEMA)
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            for version in range(current + 1, _SCHEMA_VERSION + 1):
+                sql = _MIGRATIONS.get(version)
+                if sql:
+                    conn.executescript(sql)
+                conn.execute(f"PRAGMA user_version = {version}")
             conn.commit()
         finally:
             conn.close()
