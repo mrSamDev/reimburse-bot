@@ -18,8 +18,10 @@ COPY app ./app
 
 # Durable state dirs (SQLite ledger + sessions + backups) and tmpfs scratch,
 # all owned by the non-root user. Named volumes inherit these on first mount.
-RUN mkdir -p /app/data /app/backups /tmp/reimbursement \
- && chown -R bot:bot /app/data /app/backups /tmp/reimbursement
+# /app/temp is pre-created so the config default stays writable even if the
+# TEMP_DIR env var is not applied at runtime (e.g. missing in the orchestrator).
+RUN mkdir -p /app/temp /app/data /app/backups /tmp/reimbursement \
+ && chown -R bot:bot /app/temp /app/data /app/backups /tmp/reimbursement
 
 USER bot
 
