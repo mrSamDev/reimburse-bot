@@ -298,6 +298,33 @@ class SessionStore:
     async def release_processing(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_release_processing, user_id)
 
+    def _op_renew_processing_lease(self, user_id: int) -> bool:
+        """Refresh a live processing lease's expiry (heartbeat).
+
+        A generation that runs longer than ``lease_ttl_seconds`` would otherwise
+        look crashed and be reclaimed by another instance mid-run (double
+        extraction / double billing). Renewing the expiry as the work proceeds
+        keeps the slot held for exactly as long as the run needs, while still
+        releasing it promptly when the run ends or the process dies (the
+        heartbeat dies with it). Returns False when there is nothing to renew
+        (lease already released), so a heartbeat loop can stop cleanly.
+        """
+        expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE sessions SET lease_expiry = ? "
+                "WHERE user_id = ? AND processing = 1",
+                (expiry, user_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
+    async def renew_processing_lease(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._op_renew_processing_lease, user_id)
+
     def _op_is_processing(self, user_id: int) -> bool:
         conn = self._connect()
         try:

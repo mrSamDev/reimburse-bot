@@ -232,6 +232,42 @@ async def test_is_processing_reflects_lease(tmp_path):
     assert await store.is_processing(1) is False
 
 
+# ---- Cross-process lease renewal (heartbeat) -----------------------------
+
+async def test_renew_lease_returns_true_while_processing(tmp_path):
+    store = _store(tmp_path, lease_ttl_seconds=120)
+    await store.try_acquire_processing(1)
+    assert await store.renew_processing_lease(1) is True
+
+
+async def test_renew_lease_returns_false_when_not_processing(tmp_path):
+    store = _store(tmp_path, lease_ttl_seconds=120)
+    # No lease held -> nothing to renew.
+    assert await store.renew_processing_lease(1) is False
+
+
+async def test_renew_lease_extends_expired_lease_and_blocks_reclaim(tmp_path):
+    """A heartbeat must re-arm an already-expired lease so a rival instance
+    cannot reclaim the slot mid-run (regression for the lease-vs-runtime race)."""
+    a = _store(tmp_path, lease_ttl_seconds=120)
+    b = _store(tmp_path, lease_ttl_seconds=120)
+    assert await a.try_acquire_processing(1) is True
+    # Simulate time passing past the TTL mid-run (crashed-looking lease).
+    _force_lease_expiry(tmp_path, 1)
+    # The heartbeat renews it, pushing the expiry forward again.
+    assert await a.renew_processing_lease(1) is True
+    # The lease is live again: another instance must NOT reclaim it.
+    assert await b.try_acquire_processing(1) is False
+
+
+async def test_renew_lease_after_release_is_noop(tmp_path):
+    store = _store(tmp_path, lease_ttl_seconds=120)
+    await store.try_acquire_processing(1)
+    await store.release_processing(1)
+    # After a clean release the heartbeat has nothing to renew and stops.
+    assert await store.renew_processing_lease(1) is False
+
+
 async def test_sweep_reclaims_stale_lease(tmp_path):
     store = _store(tmp_path)
     await store.try_acquire_processing(1)

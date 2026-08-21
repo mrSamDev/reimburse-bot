@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -242,6 +243,12 @@ class ReimbursementBot:
         # One id for the whole generation so every log line — including the
         # catch-all below — is attributable to the same request.
         request_id = uuid.uuid4().hex[:6]
+        # Keep the cross-process lease alive for the whole run (it can exceed the
+        # lease TTL, which would otherwise let a rival instance reclaim the slot
+        # and double-process / double-bill). Cancelled in ``finally``.
+        heartbeat = asyncio.get_running_loop().create_task(
+            self._renew_lease_loop(session.user_id)
+        )
         try:
             with request_scope(request_id):
                 try:
@@ -279,10 +286,37 @@ class ReimbursementBot:
                     )
                     session.state = BotState.IDLE
         finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             self.locks.release(session.user_id)
             await self.sessions.release_processing(session.user_id)
             session.clear_receipts()
             await self.sessions.save(session)
+
+    async def _renew_lease_loop(self, user_id: int) -> None:
+        """Heartbeat: refresh the cross-process processing lease during a long run.
+
+        A generation that runs longer than the lease TTL would otherwise look
+        crashed and be reclaimed by another instance mid-run (double extraction /
+        double billing). Renewing on a fraction of the lease TTL keeps the slot
+        held exactly as long as the work needs; the loop stops once the lease is
+        released (clean shutdown) and dies with the process on a crash, so a
+        dead run's lease still expires and becomes reclaimable.
+        """
+        interval = self.config.session_lease_ttl_seconds / 3.0
+        if interval <= 0:
+            interval = 1.0
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                renewed = await self.sessions.renew_processing_lease(user_id)
+                if not renewed:
+                    return  # lease already released -> nothing to renew
+            except Exception:
+                logger.exception("processing lease renewal failed")
 
     def _candidate_text(self, update) -> str:
         m = update.message
