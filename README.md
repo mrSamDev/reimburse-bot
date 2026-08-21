@@ -93,7 +93,7 @@ A hand-written `Dockerfile` (python:3.12-slim, ~222MB) builds the image — not 
 
 1. Copy the repo to the VPS and enter it:
    ```bash
-   git clone <your-repo-url> telegram-reimbursement-bot
+   git clone https://github.com/mrSamDev/reimburse-bot
    cd telegram-reimbursement-bot
    ```
 2. Create your secrets file from the template (never commit it):
