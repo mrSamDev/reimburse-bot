@@ -1,17 +1,16 @@
-"""Durable audit ledger for accepted receipts (SQLite)."""
+"""Durable audit ledger for accepted + failed receipts (SQLite)."""
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
-# Ordered migrations keyed by target schema version. ``v1`` creates the table
-# and the indexes used by common audit queries.
+# Ordered migrations keyed by target schema version.
 _MIGRATIONS: dict[int, str] = {
     1: """
     CREATE TABLE IF NOT EXISTS receipts (
@@ -30,22 +29,43 @@ _MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_receipts_user_id ON receipts(user_id);
     CREATE INDEX IF NOT EXISTS idx_receipts_request_id ON receipts(request_id);
     """,
+    2: """
+    ALTER TABLE receipts ADD COLUMN failure_reason TEXT;
+    ALTER TABLE receipts ADD COLUMN delivered_at TEXT;
+    """,
 }
+
+# Columns written by ``insert`` / ``insert_failure`` (order must match VALUES).
+_COLUMNS = (
+    "user_id", "file_id", "merchant_name", "transaction_date", "currency",
+    "total", "review_required", "status", "request_id", "created_at",
+    "failure_reason",
+)
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _to_decimal_or_none(value: Any) -> Decimal | None:
+    """Convert a stored total back to Decimal, tolerating empty/unknown values."""
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        return None
+
+
 class ReceiptLedger:
-    """Append-only audit trail of accepted receipts, deduplicated by ``file_id``.
+    """Durable audit trail of receipts, deduplicated by ``file_id``.
 
-    ``total`` is stored as TEXT (the string form of a ``Decimal``) so no
-    precision is lost, matching the app-wide Decimal discipline. Idempotent by
-    ``file_id``: re-running a batch after a crash never double-counts a receipt.
+    Accepted receipts carry a ``Decimal`` ``total`` and ``status='accepted'``;
+    failed ones carry ``status='failed'`` with a ``failure_reason`` and no total.
+    Idempotent by ``file_id`` so a re-run after a crash never double-counts.
 
-    A fresh connection is opened per operation and WAL mode is enabled, which is
-    safe to call from worker threads via ``asyncio.to_thread``.
+    A fresh connection is opened per operation with WAL mode, safe to call from
+    worker threads via ``asyncio.to_thread``.
     """
 
     def __init__(self, db_path: str | Path) -> None:
@@ -54,10 +74,7 @@ class ReceiptLedger:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Bring the schema up to ``_SCHEMA_VERSION`` via ``PRAGMA user_version``.
-
-        Applies each missing migration exactly once; re-construction is a no-op.
-        """
+        """Bring the schema up to ``_SCHEMA_VERSION`` via ``PRAGMA user_version``."""
         conn = self._connect()
         try:
             current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -75,8 +92,21 @@ class ReceiptLedger:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    def _insert_row(self, row: tuple) -> bool:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO receipts ({', '.join(_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
+                row,
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
     def insert(self, entry: dict[str, Any]) -> bool:
-        """Insert one receipt; True if newly inserted, False on duplicate file_id."""
+        """Insert an accepted receipt; True if newly inserted, False on dup file_id."""
         row = (
             int(entry["user_id"]),
             entry.get("file_id") or None,
@@ -88,18 +118,46 @@ class ReceiptLedger:
             entry.get("status", "accepted"),
             entry["request_id"],
             entry.get("created_at") or _utc_now(),
+            None,  # failure_reason
         )
+        return self._insert_row(row)
+
+    def insert_failure(
+        self,
+        file_id: str,
+        reason: str,
+        *,
+        request_id: str,
+        user_id: int,
+        created_at: str | None = None,
+    ) -> bool:
+        """Record a receipt that could not be processed (status='failed')."""
+        row = (
+            int(user_id),
+            file_id or None,
+            "",  # merchant unknown for a failed receipt
+            None,
+            "",  # currency unknown
+            "",  # no total for a failed receipt
+            0,
+            "failed",
+            request_id,
+            created_at or _utc_now(),
+            reason,
+        )
+        return self._insert_row(row)
+
+    def mark_delivered(self, request_id: str, delivered_at: str | None = None) -> int:
+        """Record that every receipt in a request was delivered. Returns rows touched."""
         conn = self._connect()
         try:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO receipts "
-                "(user_id, file_id, merchant_name, transaction_date, currency, "
-                " total, review_required, status, request_id, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                row,
+                "UPDATE receipts SET delivered_at = ? WHERE request_id = ? "
+                "AND delivered_at IS NULL",
+                (delivered_at or _utc_now(), request_id),
             )
             conn.commit()
-            return cur.rowcount == 1
+            return cur.rowcount
         finally:
             conn.close()
 
@@ -110,18 +168,24 @@ class ReceiptLedger:
         finally:
             conn.close()
 
+    def by_user(self, user_id: int) -> list[dict[str, Any]]:
+        """Return every receipt for one user, oldest-first, ``total`` as Decimal."""
+        return self._fetch("WHERE user_id = ? ORDER BY id", (int(user_id),))
+
     def all(self) -> list[dict[str, Any]]:
-        """Return every receipt, newest-last, with ``total`` as ``Decimal``."""
+        """Return every receipt, oldest-first, ``total`` as Decimal."""
+        return self._fetch("ORDER BY id", ())
+
+    def _fetch(self, where: str, params: tuple) -> list[dict[str, Any]]:
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT * FROM receipts ORDER BY id").fetchall()
+            rows = conn.execute(f"SELECT * FROM receipts {where}", params).fetchall()
             cols = [d[0] for d in conn.execute("SELECT * FROM receipts LIMIT 0").description]
         finally:
             conn.close()
         out = []
         for r in rows:
             d = dict(zip(cols, r, strict=True))
-            if d.get("total") is not None:
-                d["total"] = Decimal(d["total"])
+            d["total"] = _to_decimal_or_none(d.get("total"))
             out.append(d)
         return out

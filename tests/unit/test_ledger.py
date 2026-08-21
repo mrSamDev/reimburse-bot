@@ -100,14 +100,14 @@ def test_ledger_created_in_nonexistent_dir(tmp_path):
 def test_schema_version_starts_at_1(tmp_path):
     db = tmp_path / "ledger.db"
     ReceiptLedger(db)
-    assert _user_version(db) == 1
+    assert _user_version(db) == 2
 
 
 def test_reconstruct_is_idempotent_version(tmp_path):
     db = tmp_path / "ledger.db"
     ReceiptLedger(db)
     ReceiptLedger(db)
-    assert _user_version(db) == 1
+    assert _user_version(db) == 2
 
 
 def test_indexes_created_for_common_queries(tmp_path):
@@ -122,15 +122,51 @@ def test_future_migration_applies_once(tmp_path, monkeypatch):
     from app.services import ledger_service as mod
 
     db = tmp_path / "ledger.db"
-    ReceiptLedger(db)  # applies v1
-    # Simulate a future release bumping the schema to v2 (adds a column).
-    monkeypatch.setattr(mod, "_SCHEMA_VERSION", 2)
+    ReceiptLedger(db)  # applies current version
+    # Simulate a future release bumping the schema.
+    monkeypatch.setattr(mod, "_SCHEMA_VERSION", 3)
     monkeypatch.setattr(
         mod,
         "_MIGRATIONS",
-        {1: mod._MIGRATIONS[1], 2: "ALTER TABLE receipts ADD COLUMN region TEXT;"},
+        {1: mod._MIGRATIONS[1], 2: mod._MIGRATIONS[2], 3: "ALTER TABLE receipts ADD COLUMN region TEXT;"},
     )
-    ReceiptLedger(db)  # fresh instance must apply v2
-    assert _user_version(db) == 2
+    ReceiptLedger(db)  # fresh instance must apply v3
+    assert _user_version(db) == 3
     ReceiptLedger(db)  # and must not re-apply it
-    assert _user_version(db) == 2
+    assert _user_version(db) == 3
+
+
+def test_insert_failure_records_status_and_reason(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert_failure("f1", "AI error", request_id="r1", user_id=1)
+    row = lg.all()[0]
+    assert row["status"] == "failed"
+    assert row["file_id"] == "f1"
+    assert row["failure_reason"] == "AI error"
+    assert row["total"] is None  # no known total for a failed receipt
+
+
+def test_failure_row_does_not_collide_with_accepted(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1"))
+    lg.insert_failure("f2", "boom", request_id="r1", user_id=1)
+    assert lg.count() == 2
+    statuses = {r["status"] for r in lg.all()}
+    assert statuses == {"accepted", "failed"}
+
+
+def test_by_user_returns_only_that_users_rows(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1", user_id=1))
+    lg.insert(_entry("f2", user_id=2))
+    assert len(lg.by_user(1)) == 1
+    assert lg.by_user(1)[0]["file_id"] == "f1"
+    assert lg.by_user(99) == []
+
+
+def test_mark_delivered_sets_delivered_at(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1", request_id="r1"))
+    assert lg.by_user(1)[0]["delivered_at"] is None
+    lg.mark_delivered("r1")
+    assert lg.by_user(1)[0]["delivered_at"] is not None

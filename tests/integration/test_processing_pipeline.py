@@ -304,6 +304,26 @@ async def test_ledger_idempotent_across_rerun(tmp_path):
     assert ledger.count() == 1  # same file_id deduplicated
 
 
+async def test_ledger_records_failed_receipt(tmp_path):
+    cfg = _config(tmp_path)
+    ledger = ReceiptLedger(tmp_path / "ledger.db")
+    # f1 fails every retry attempt; f2 succeeds.
+    svc = ProcessingService(
+        cfg,
+        FakeProvider([AIProviderError("bad receipt")] * 3 + [_ext("ok", "10")]),
+        FakeTelegram(),
+        ledger=ledger,
+    )
+    await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    rows = ledger.all()
+    assert len(rows) == 2
+    statuses = {r["status"] for r in rows}
+    assert statuses == {"accepted", "failed"}
+    failed = next(r for r in rows if r["status"] == "failed")
+    assert failed["file_id"] == "f1"
+    assert failed["failure_reason"]
+
+
 async def test_ledger_records_multiple_receipts(tmp_path):
     cfg = _config(tmp_path)
     ledger = ReceiptLedger(tmp_path / "ledger.db")

@@ -208,6 +208,7 @@ class ReimbursementBot:
                     await self.telegram.send_document(
                         session.chat_id, result.out_pdf_path, caption=caption
                     )
+                    await self.processing.mark_delivered(request_id)
 
                 await run_with_cleanup(
                     self.processing,

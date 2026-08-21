@@ -118,6 +118,11 @@ class ProcessingService:
         self._telegram = telegram
         self._ledger = ledger
 
+    async def mark_delivered(self, request_id: str) -> None:
+        """Record that a generated report was actually sent to the user."""
+        if self._ledger is not None:
+            await asyncio.to_thread(self._ledger.mark_delivered, request_id)
+
     def _to_entry(self, receipt: Receipt, request_id: str, user_id: int) -> dict:
         """Map a validated receipt to an audit-ledger row."""
         return {
@@ -196,6 +201,14 @@ class ProcessingService:
                         failed += 1
                         receipt_failures.append({"file_id": file_id, "reason": outcome.reason})
                         logger.info("receipt failed: %s", outcome.reason)
+                        if self._ledger is not None:
+                            await asyncio.to_thread(
+                                self._ledger.insert_failure,
+                                file_id,
+                                outcome.reason,
+                                request_id=request_id,
+                                user_id=user_id,
+                            )
                     else:
                         receipt = outcome.receipt
                         if receipt is None:
