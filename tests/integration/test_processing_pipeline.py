@@ -1,5 +1,6 @@
 """Integration tests for the processing pipeline using fakes."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from app.services.receipt_service import (
     ProcessingService,
     run_with_cleanup,
 )
+from app.utils.logging import RequestIdFormatter
 
 
 def _make_image(path: Path) -> Path:
@@ -137,6 +139,32 @@ async def test_empty_batch_rejected(tmp_path):
     svc = ProcessingService(cfg, FakeProvider([]), FakeTelegram())
     with pytest.raises(ProcessingError):
         await run_with_cleanup(svc, 1, [], cfg.temp_dir)
+
+
+async def test_processing_logs_carry_request_id(tmp_path):
+    cfg = _config(tmp_path)
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10")]), FakeTelegram())
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.setFormatter(RequestIdFormatter("%(message)s"))
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append(self.format(record))
+
+    handler = _Capture()
+    handler.setLevel(logging.DEBUG)
+    svc_logger = logging.getLogger("app.services.receipt_service")
+    svc_logger.setLevel(logging.DEBUG)
+    svc_logger.addHandler(handler)
+    try:
+        result = await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+        assert handler.lines, "expected at least one processing log line"
+        assert any(f"request_id={result.request_id}" in line for line in handler.lines)
+    finally:
+        svc_logger.removeHandler(handler)
 
 
 async def test_too_many_receipts_rejected(tmp_path):

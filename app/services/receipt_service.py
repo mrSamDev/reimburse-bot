@@ -18,6 +18,7 @@ from app.services.cleanup_service import cleanup_request_dir
 from app.services.pdf_service import generate_report
 from app.services.telegram_service import TelegramService
 from app.utils import images
+from app.utils.logging import request_scope
 
 logger = logging.getLogger(__name__)
 
@@ -130,54 +131,58 @@ class ProcessingService:
         image_map: dict[str, str] = {}
         failed = 0
 
-        try:
-            for idx, file_id in enumerate(file_ids):
-                outcome = await self._process_one(file_id, idx, input_dir, normalized_dir)
-                if outcome.failed:
-                    failed += 1
-                    logger.info("receipt failed: %s", outcome.reason)
-                    continue
-                receipt = outcome.receipt
-                batch.add(receipt)
-                image_map[receipt.source_file_id] = str(
-                    normalized_dir / f"receipt_{idx:03d}.jpg"
-                )
-
-            if not batch.receipts:
-                raise ProcessingError(
-                    f"None of the {len(file_ids)} receipts could be processed"
-                )
-
-            batch.processed_count = len(batch.receipts)
-            batch.failed_count = failed
-            batch.review_count = sum(1 for r in batch.receipts if r.review_required)
-
-            out_pdf = output_dir / _pdf_filename(request_id)
-            await asyncio.to_thread(
-                generate_report,
-                batch,
-                out_pdf,
-                title=self._config.report_title,
-                period=self._config.report_period,
-                image_map=image_map,
+        with request_scope(request_id):
+            logger.info(
+                "processing started: user=%s receipts=%d", user_id, len(file_ids)
             )
-        except ProcessingError:
-            raise
-        except Exception as exc:
-            logger.exception("processing failed (request %s)", request_id)
-            raise ProcessingError(
-                "Something went wrong while processing your receipts"
-            ) from exc
+            try:
+                for idx, file_id in enumerate(file_ids):
+                    outcome = await self._process_one(file_id, idx, input_dir, normalized_dir)
+                    if outcome.failed:
+                        failed += 1
+                        logger.info("receipt failed: %s", outcome.reason)
+                        continue
+                    receipt = outcome.receipt
+                    batch.add(receipt)
+                    image_map[receipt.source_file_id] = str(
+                        normalized_dir / f"receipt_{idx:03d}.jpg"
+                    )
 
-        return ProcessingResult(
-            batch=batch,
-            out_pdf_path=out_pdf,
-            request_id=request_id,
-            request_base=base,
-            processed_count=len(batch.receipts),
-            failed_count=failed,
-            review_count=batch.review_count,
-        )
+                if not batch.receipts:
+                    raise ProcessingError(
+                        f"None of the {len(file_ids)} receipts could be processed"
+                    )
+
+                batch.processed_count = len(batch.receipts)
+                batch.failed_count = failed
+                batch.review_count = sum(1 for r in batch.receipts if r.review_required)
+
+                out_pdf = output_dir / _pdf_filename(request_id)
+                await asyncio.to_thread(
+                    generate_report,
+                    batch,
+                    out_pdf,
+                    title=self._config.report_title,
+                    period=self._config.report_period,
+                    image_map=image_map,
+                )
+            except ProcessingError:
+                raise
+            except Exception as exc:
+                logger.exception("processing failed (request %s)", request_id)
+                raise ProcessingError(
+                    "Something went wrong while processing your receipts"
+                ) from exc
+
+            return ProcessingResult(
+                batch=batch,
+                out_pdf_path=out_pdf,
+                request_id=request_id,
+                request_base=base,
+                processed_count=len(batch.receipts),
+                failed_count=failed,
+                review_count=batch.review_count,
+            )
 
     async def _process_one(
         self,
