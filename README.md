@@ -5,18 +5,22 @@ generates a PDF reimbursement report via a vision AI provider.
 
 ## Key design points
 
-- **Receipts stay in Telegram.** Only Telegram `file_id` values are held in the
-  in-memory session. Files are downloaded only after `/generate` +
-  correct password.
+- **Receipts stay in Telegram.** Only Telegram `file_id` values are held in
+  staging sessions. Files are downloaded only after `/generate` + correct
+  password.
 - **AI owns extraction, the app owns arithmetic.** All totals are computed with
   Python `Decimal`. AI output is validated (Pydantic schema + business rules)
   before use, and never passed raw to the PDF layer.
 - **Temporary, request-scoped storage.** Images, normalized images and the PDF
   live under `temp/request_<id>/` and are deleted in a `finally` block even on
   failure (and orphans from a crash are swept at startup).
-- **Durable audit ledger.** Every accepted receipt is recorded in a local
-  SQLite database (`data/receipts.db`), deduplicated by Telegram `file_id`,
-  so accepted reimbursements have a persistent trail across restarts.
+- **Durable state layer.** Per-user staging sessions and the cross-process
+  per-user processing lease live in SQLite (`data/sessions.db`, WAL), so state
+  survives restarts and generation is serialized across instances. Stale
+  sessions and crashed leases are purged at startup.
+- **Durable audit ledger.** Every accepted and failed receipt is recorded in
+  SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with
+  delivery outcome, so reimbursements have a persistent trail across restarts.
 
 ## Requirements
 
