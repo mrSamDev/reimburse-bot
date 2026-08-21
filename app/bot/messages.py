@@ -26,6 +26,8 @@ HEADING_EMPTY = "Please send a text heading for the report."
 
 WRONG_PASSWORD = "Incorrect password. The password flow has been cancelled."
 
+PASSWORD_LOCKED = "Too many incorrect attempts. Please try again later."
+
 CANCELLED = "Cancelled."
 
 NO_RECEIPTS = "No receipts have been uploaded."

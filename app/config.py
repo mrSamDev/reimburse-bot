@@ -61,6 +61,8 @@ class Config(BaseModel):
     health_enabled: bool = False
     health_port: int = 8080
     health_token: str = ""
+    password_max_attempts: int = 5
+    password_lockout_seconds: int = 300
     report_title: str = "Heading Travel Expenses"
     # Deprecated: the report period is now derived from the receipts'
     # transaction dates (see app/services/report_period.py), not read from env.
@@ -92,7 +94,8 @@ class Config(BaseModel):
         raise ValueError("allowed ids must be a comma-separated string or a list of ints")
 
     @field_validator("max_receipts", "max_file_size_mb", "ai_timeout_seconds",
-                     "telegram_timeout_seconds", "session_ttl_seconds")
+                     "telegram_timeout_seconds", "session_ttl_seconds",
+                     "password_max_attempts", "password_lockout_seconds")
     @classmethod
     def _check_positive_int(cls, v: int, info: Any) -> int:
         if v <= 0:
@@ -269,6 +272,8 @@ def _from_env() -> dict[str, Any]:
         "health_enabled": (get("HEALTH_ENABLED", "false") or "false").lower() in ("1", "true", "yes"),
         "health_port": int(get("HEALTH_PORT", "8080")),
         "health_token": get("HEALTH_TOKEN", ""),
+        "password_max_attempts": int(get("PASSWORD_MAX_ATTEMPTS", "5")),
+        "password_lockout_seconds": int(get("PASSWORD_LOCKOUT_SECONDS", "300")),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
     }
 

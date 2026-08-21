@@ -477,3 +477,52 @@ async def test_photo_during_awaiting_password_not_deleted(tmp_path):
     # The correct password still proceeds and delivers.
     await bot.message_handler(_text_update("secret"), None)
     assert len(transport.sent_docs) == 1
+
+
+async def test_password_lockout_after_repeated_attempts(tmp_path):
+    """Repeated wrong passwords lock the user out; even the correct password is
+    rejected during the lockout window."""
+    config = Config(
+        telegram_token="t", allowed_user_ids="111", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_request_delay_seconds=0,
+        password_max_attempts=2, password_lockout_seconds=300,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = FakeTransport()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
+    provider = FakeProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
+
+    # First wrong attempt: not locked, shows remaining count.
+    m1 = FakeMessage("wrong")
+    await bot.message_handler(FakeUpdate(m1), None)
+    assert bot.throttle.is_locked(111) is False
+    assert bot.throttle.remaining_attempts(111) == 1
+    assert "remaining" in m1.replies[-1]
+
+    # Re-enter the flow (a wrong password resets to IDLE) and fail again -> locked.
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    m2 = FakeMessage("wrong")
+    await bot.message_handler(FakeUpdate(m2), None)
+    assert bot.throttle.is_locked(111) is True
+    assert "Too many" in m2.replies[-1]
+
+    # Re-enter the flow and try the correct password; still rejected while locked.
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
+    msg3 = FakeMessage("secret")
+    await bot.message_handler(FakeUpdate(msg3), None)
+    assert transport.sent_docs == []
+    assert "Too many" in msg3.replies[-1]

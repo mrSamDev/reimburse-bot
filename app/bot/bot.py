@@ -21,6 +21,7 @@ from app.bot.logic import (
     handle_status,
 )
 from app.bot.states import BotState
+from app.bot.throttle import PasswordThrottle
 from app.config import Config
 from app.services.receipt_service import (
     ProcessingError,
@@ -55,9 +56,12 @@ class ReimbursementBot:
         self.telegram = telegram
         self.processing = processing
         self.locks = UserLockManager()
+        self.throttle = PasswordThrottle(
+            max_attempts=config.password_max_attempts,
+            lockout_seconds=config.password_lockout_seconds,
+        )
         configure_logging(config.log_level, config.log_format)
 
-    # ---- guards -----------------------------------------------------------
     def _authorized(self, update):
         user = update.effective_user
         chat = update.effective_chat
@@ -213,27 +217,32 @@ class ReimbursementBot:
         await self.sessions.save(session)
         if reply:
             await self._reply(update, reply)
-        if valid:
-            # Heading captured; now prompt for the password.
-            return
 
     async def _password_attempt(self, update, session) -> None:
         candidate = self._candidate_text(update)
-        # A non-text message (photo/document) while awaiting the password must
-        # not be consumed as a password attempt, deleted, or cancel the flow.
+        # Non-text input while awaiting password: ignore (don't consume/delete/cancel).
         if candidate == "":
             await self._reply(update, msg.PASSWORD_PROMPT)
             return
+        if self.throttle.is_locked(session.user_id):
+            await self._reply(update, msg.PASSWORD_LOCKED)
+            return
         new_state, reply, correct = handle_password(session, candidate, security=self.security)
-        # Best-effort delete the password message to avoid it lingering in chat.
         if update.effective_message:
-            await self.telegram.delete_message(session.chat_id, update.effective_message.message_id)
+            await self.telegram.delete_message(session.chat_id, update.effective_message.message_id)  # don't leave password in chat
         if not correct:
+            self.throttle.record_failure(session.user_id)
             session.state = new_state
             await self.sessions.save(session)
-            if reply:
-                await self._reply(update, reply)
+            if self.throttle.is_locked(session.user_id):
+                await self._reply(update, msg.PASSWORD_LOCKED)
+            else:
+                remaining = self.throttle.remaining_attempts(session.user_id)
+                await self._reply(
+                    update, f"{reply} ({remaining} attempt{'s' if remaining != 1 else ''} remaining)"
+                )
             return
+        self.throttle.reset(session.user_id)
         session.state = BotState.PROCESSING
         await self._reply(update, msg.PROCESSING_STARTED.format(n=len(session.receipt_file_ids)))
         await self._run_generation(update, session)

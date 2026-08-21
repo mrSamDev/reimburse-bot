@@ -168,3 +168,21 @@ def test_health_token_default_and_env(tmp_path, monkeypatch):
     env_file = tmp_path / "envfile"
     env_file.write_text("HEALTH_TOKEN=probe-secret\n")
     assert load_config(env_file=env_file, strict=False).health_token == "probe-secret"
+
+
+def test_password_throttle_config_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("PASSWORD_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("PASSWORD_LOCKOUT_SECONDS", raising=False)
+    cfg = load_config(strict=False)
+    assert cfg.password_max_attempts == 5
+    assert cfg.password_lockout_seconds == 300
+
+    env_file = tmp_path / "envfile"
+    env_file.write_text("PASSWORD_MAX_ATTEMPTS=3\nPASSWORD_LOCKOUT_SECONDS=60\n")
+    cfg = load_config(env_file=env_file, strict=False)
+    assert cfg.password_max_attempts == 3
+    assert cfg.password_lockout_seconds == 60
+
+    monkeypatch.setenv("PASSWORD_MAX_ATTEMPTS", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
