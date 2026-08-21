@@ -28,6 +28,7 @@ def build_application(config: Config, sessions: SessionStore | None = None) -> A
         sessions = SessionStore(
             db_path=config.data_dir / "sessions.db",
             ttl_seconds=config.session_ttl_seconds,
+            lease_ttl_seconds=config.session_lease_ttl_seconds,
         )
 
     application = (
@@ -83,6 +84,7 @@ def main() -> None:
     sessions = SessionStore(
         db_path=config.data_dir / "sessions.db",
         ttl_seconds=config.session_ttl_seconds,
+        lease_ttl_seconds=config.session_lease_ttl_seconds,
     )
     purged = asyncio.run(sessions.purge_expired())
     if purged:

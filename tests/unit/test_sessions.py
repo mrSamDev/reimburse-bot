@@ -182,6 +182,46 @@ async def test_try_acquire_creates_row(tmp_path):
     assert await store.count() == 1
 
 
+def _force_lease_expiry(tmp_path, user_id: int) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    conn.execute(
+        "UPDATE sessions SET lease_expiry = ? WHERE user_id = ?",
+        ("2000-01-01T00:00:00+00:00", user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+async def test_stale_lease_reclaimable_by_other_instance(tmp_path):
+    a = _store(tmp_path)
+    b = _store(tmp_path)
+    assert await a.try_acquire_processing(1) is True
+    # Simulate a crash: the lease is left set but long expired.
+    _force_lease_expiry(tmp_path, 1)
+    # Another instance must be able to reclaim the abandoned lease.
+    assert await b.try_acquire_processing(1) is True
+    assert await a.try_acquire_processing(1) is False  # now held by b
+
+
+async def test_live_lease_not_reacquirable(tmp_path):
+    a = _store(tmp_path)
+    b = _store(tmp_path)
+    assert await a.try_acquire_processing(1) is True
+    # A still-live lease (not expired) blocks other instances.
+    assert await b.try_acquire_processing(1) is False
+
+
+async def test_release_clears_processing_and_lease(tmp_path):
+    store = _store(tmp_path)
+    assert await store.try_acquire_processing(1) is True
+    await store.release_processing(1)
+    # After release the slot is re-acquirable.
+    assert await store.try_acquire_processing(1) is True
+
+
+
 async def test_purge_expired_clears_stale_processing(tmp_path):
     store = _store(tmp_path, ttl_seconds=30)
     past = datetime.now(timezone.utc) - timedelta(seconds=31)

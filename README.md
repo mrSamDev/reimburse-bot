@@ -65,6 +65,7 @@ python -m app.main         # start long polling
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `AI_CONCURRENCY` | Max receipts extracted in parallel (default 2) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 300) |
+| `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
 
 ## Commands

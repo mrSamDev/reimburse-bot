@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.bot.states import BotState
 from app.models.session import Session
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -23,6 +23,9 @@ _MIGRATIONS: dict[int, str] = {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
+    """,
+    2: """
+    ALTER TABLE sessions ADD COLUMN lease_expiry TEXT;
     """,
 }
 
@@ -45,10 +48,16 @@ class SessionStore:
     atomic ``UPDATE ... WHERE processing = 0`` that is safe across instances.
     """
 
-    def __init__(self, db_path: str | Path, ttl_seconds: int = 1800) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        ttl_seconds: int = 1800,
+        lease_ttl_seconds: int = 120,
+    ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ttl = ttl_seconds
+        self._lease_ttl = lease_ttl_seconds
         self._migrate()
 
     # ---- connection / schema -------------------------------------------
@@ -191,8 +200,11 @@ class SessionStore:
     async def try_acquire_processing(self, user_id: int) -> bool:
         """Atomically claim the per-user processing slot across processes.
 
-        Returns True iff this caller won the claim (row was not already held).
+        An abandoned lease (crashed generation) is reclaimed when its ``lease_expiry``
+        has passed. Returns True iff this caller won the claim.
         """
+        lease = _utc_now()
+        expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
         conn = self._connect()
         try:
             # Ensure a row exists (create absent) without overwriting live state.
@@ -200,12 +212,19 @@ class SessionStore:
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
                 (user_id, user_id, BotState.IDLE.value, json.dumps([]),
-                 0, _utc_now(), _utc_now()),
+                 0, lease, lease),
+            )
+            # Reclaim an abandoned (already-expired) lease from a crashed generation.
+            conn.execute(
+                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
+                "WHERE user_id = ? AND processing = 1 "
+                "AND lease_expiry IS NOT NULL AND lease_expiry < ?",
+                (user_id, lease),
             )
             cur = conn.execute(
-                "UPDATE sessions SET processing = 1 "
+                "UPDATE sessions SET processing = 1, lease_expiry = ? "
                 "WHERE user_id = ? AND processing = 0",
-                (user_id,),
+                (expiry, user_id),
             )
             conn.commit()
             return cur.rowcount == 1
@@ -216,7 +235,8 @@ class SessionStore:
         conn = self._connect()
         try:
             conn.execute(
-                "UPDATE sessions SET processing = 0 WHERE user_id = ?", (user_id,)
+                "UPDATE sessions SET processing = 0, lease_expiry = NULL WHERE user_id = ?",
+                (user_id,),
             )
             conn.commit()
         finally:

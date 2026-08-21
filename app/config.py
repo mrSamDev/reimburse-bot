@@ -48,6 +48,7 @@ class Config(BaseModel):
     max_processing_seconds: float = 300.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
+    session_lease_ttl_seconds: int = 120
     log_level: str = "INFO"
     report_title: str = "Heading Travel Expenses"
     report_period: str = ""
@@ -103,6 +104,13 @@ class Config(BaseModel):
     def _check_concurrency(cls, v: int) -> int:
         if v < 1:
             raise ValueError("ai_concurrency must be >= 1")
+        return v
+
+    @field_validator("session_lease_ttl_seconds")
+    @classmethod
+    def _check_lease_ttl(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("session_lease_ttl_seconds must be >= 1")
         return v
 
     @field_validator("max_processing_seconds")
@@ -177,6 +185,7 @@ def _from_env() -> dict[str, Any]:
         "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "300")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
+        "session_lease_ttl_seconds": int(get("SESSION_LEASE_TTL_SECONDS", "120")),
         "log_level": get("LOG_LEVEL", "INFO"),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
         "report_period": get("REPORT_PERIOD", ""),
