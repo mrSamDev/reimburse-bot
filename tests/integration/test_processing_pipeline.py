@@ -205,15 +205,40 @@ class _SlowProvider:
         return _ext("A", "10")
 
 
-async def test_batch_time_budget_aborts_cleanly(tmp_path):
+class _MixedProvider:
+    """First receipt is slow (times out); the rest are fast."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def extract_receipt(self, image_path):
+        self.calls += 1
+        if self.calls == 1:
+            time.sleep(0.2)
+        return _ext("Good", "10")
+
+
+async def test_per_receipt_timeout_marks_failed(tmp_path):
+    cfg = _config(tmp_path)  # ai_concurrency=1 -> deterministic order
+    cfg.ai_per_receipt_timeout_seconds = 0.1
+    svc = ProcessingService(cfg, _MixedProvider(), FakeTelegram())
+    result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    assert result.failed_count == 1
+    assert result.processed_count == 1
+    assert result.receipt_failures[0]["reason"] == "timeout"
+    assert result.receipt_failures[0]["file_id"] == "f1"
+
+
+async def test_batch_budget_hard_cap_raises(tmp_path):
+    # The extraction phase must abort at the budget, not drain every receipt.
     cfg = _config(tmp_path)
-    cfg.max_processing_seconds = 0.01  # far below what 2 slow receipts need
+    cfg.max_processing_seconds = 0.01
     svc = ProcessingService(cfg, _SlowProvider(), FakeTelegram())
     with pytest.raises(ProcessingError):
-        await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
-    # Cleanup still ran even though the batch was aborted.
+        await run_with_cleanup(svc, 1, ["f1", "f2", "f3", "f4"], cfg.temp_dir)
     leftovers = [p for p in Path(cfg.temp_dir).iterdir() if p.name.startswith("request_")]
     assert leftovers == []
+
 
 
 async def test_batch_budget_zero_disables_limit(tmp_path):

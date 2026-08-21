@@ -190,9 +190,20 @@ class ProcessingService:
                     async with sem:
                         return await self._process_one(file_id, idx, input_dir, normalized_dir)
 
-                outcomes = await asyncio.gather(
+                gather = asyncio.gather(
                     *(_limited(file_id, idx) for idx, file_id in enumerate(file_ids))
                 )
+                if budget > 0:
+                    # Hard cap on the extraction phase: a batch that exceeds the
+                    # budget is aborted rather than allowed to drain.
+                    try:
+                        outcomes = await asyncio.wait_for(gather, timeout=budget)
+                    except (asyncio.TimeoutError, TimeoutError) as exc:
+                        raise ProcessingError(
+                            f"Processing time limit ({budget}s) exceeded"
+                        ) from exc
+                else:
+                    outcomes = await gather
 
                 # Phase 2: assemble the batch in input order (deterministic).
                 for idx, (file_id, outcome) in enumerate(zip(file_ids, outcomes, strict=True)):
@@ -276,20 +287,26 @@ class ProcessingService:
     ) -> _ReceiptOutcome:
         raw_path = input_dir / f"receipt_{idx:03d}.img"
         norm_path = normalized_dir / f"receipt_{idx:03d}.jpg"
+        timeout = self._config.ai_per_receipt_timeout_seconds
         try:
-            await self._telegram.download_file(file_id, raw_path)
-            file_validation.validate_downloaded_image(
-                raw_path, max_size_mb=self._config.max_file_size_mb
-            )
-            await asyncio.to_thread(images.normalize_image, raw_path, norm_path)
-            extraction = await _extract_with_retry(
-                self._provider,
-                norm_path,
-                max_attempts=self._config.ai_retry_attempts,
-                base_delay=self._config.ai_retry_base_delay,
-            )
+            async def _work():
+                await self._telegram.download_file(file_id, raw_path)
+                file_validation.validate_downloaded_image(
+                    raw_path, max_size_mb=self._config.max_file_size_mb
+                )
+                await asyncio.to_thread(images.normalize_image, raw_path, norm_path)
+                return await _extract_with_retry(
+                    self._provider,
+                    norm_path,
+                    max_attempts=self._config.ai_retry_attempts,
+                    base_delay=self._config.ai_retry_base_delay,
+                )
+
+            extraction = await asyncio.wait_for(_work(), timeout=timeout)
             receipt = validate_extraction(extraction, file_id)
             return _ReceiptOutcome(receipt=receipt)
+        except (asyncio.TimeoutError, TimeoutError):
+            return _ReceiptOutcome(failed=True, reason="timeout")
         except RECEIPT_FAILURE_EXCEPTIONS as exc:
             return _ReceiptOutcome(failed=True, reason=str(exc))
         except Exception as exc:  # isolate this receipt, keep the batch alive

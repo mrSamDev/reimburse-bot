@@ -45,6 +45,7 @@ class Config(BaseModel):
     ai_retry_attempts: int = 3
     ai_retry_base_delay: float = 1.0
     ai_concurrency: int = 2
+    ai_per_receipt_timeout_seconds: int = 120
     max_processing_seconds: float = 300.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
@@ -111,6 +112,13 @@ class Config(BaseModel):
     def _check_lease_ttl(cls, v: int) -> int:
         if v < 1:
             raise ValueError("session_lease_ttl_seconds must be >= 1")
+        return v
+
+    @field_validator("ai_per_receipt_timeout_seconds")
+    @classmethod
+    def _check_per_receipt_timeout(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("ai_per_receipt_timeout_seconds must be >= 1")
         return v
 
     @field_validator("max_processing_seconds")
@@ -182,6 +190,7 @@ def _from_env() -> dict[str, Any]:
         "ai_retry_attempts": int(get("AI_RETRY_ATTEMPTS", "3")),
         "ai_retry_base_delay": float(get("AI_RETRY_BASE_DELAY", "1.0")),
         "ai_concurrency": int(get("AI_CONCURRENCY", "2")),
+        "ai_per_receipt_timeout_seconds": int(get("AI_PER_RECEIPT_TIMEOUT_SECONDS", "120")),
         "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "300")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
