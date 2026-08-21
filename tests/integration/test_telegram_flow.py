@@ -328,7 +328,14 @@ async def test_concurrent_message_during_generation_is_busy(tmp_path):
 
     # Correct password starts generation; it blocks inside a worker thread.
     gen_task = asyncio.create_task(bot.message_handler(_text_update("secret"), None))
-    await asyncio.sleep(0.1)  # let it acquire the lease and persist PROCESSING
+    # Wait (poll) until the PROCESSING state is persisted before sending the
+    # concurrent message. A fixed sleep races on slow/loaded CI runners.
+    for _ in range(100):
+        s = await sessions.get(111)
+        if s is not None and s.state == BotState.PROCESSING:
+            break
+        await asyncio.sleep(0.01)
+    assert (await sessions.get(111)).state == BotState.PROCESSING
 
     # Same user sends another photo mid-generation.
     busy_msg = FakeMessage(photo=[FakePhoto("f2")], message_id=99)
