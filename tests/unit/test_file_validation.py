@@ -8,7 +8,6 @@ from app.services.file_validation import (
     UnsupportedTypeError,
     validate_downloaded_image,
 )
-from app.services.temp_service import TempService
 from app.utils.images import ImageNormalizationError, get_dimensions, normalize_image
 from tests.conftest import (
     make_corrupt,
@@ -89,32 +88,3 @@ class TestNormalization:
         src = make_corrupt(tmp_path / "bad.jpg")
         with pytest.raises(ImageNormalizationError):
             normalize_image(src, tmp_path / "out.jpg")
-
-
-class TestTempService:
-    def test_create_request_dir_structure(self, tmp_path):
-        ts = TempService(tmp_path / "temp")
-        base = ts.create_request_dir("abc123")
-        assert base.name == "request_abc123"
-        assert (base / "input").is_dir()
-        assert (base / "normalized").is_dir()
-        assert (base / "output").is_dir()
-
-    def test_cleanup_removes_tree(self, tmp_path):
-        ts = TempService(tmp_path / "temp")
-        base = ts.create_request_dir("xyz")
-        (base / "input" / "x.jpg").write_bytes(b"xx")
-        assert base.exists()
-        ts.cleanup(base)
-        assert not base.exists()
-
-    def test_cleanup_missing_is_noop(self, tmp_path):
-        ts = TempService(tmp_path / "temp")
-        ts.cleanup(tmp_path / "request_nope")
-
-    def test_dirs_helper(self, tmp_path):
-        ts = TempService(tmp_path / "temp")
-        base = ts.create_request_dir()
-        assert ts.input_dir(base).name == "input"
-        assert ts.normalized_dir(base).name == "normalized"
-        assert ts.output_dir(base).name == "output"

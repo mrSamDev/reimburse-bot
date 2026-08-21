@@ -47,32 +47,6 @@ def normalize_image(
     except Exception as exc:  # PIL raises many exception types for corrupt input
         raise ImageNormalizationError(f"Failed to normalize image: {exc}") from exc
     return dst
-
-
 def get_dimensions(path: str | Path) -> tuple[int, int]:
     with Image.open(path) as im:
         return im.size
-
-
-def normalize_batch(
-    src_dir: str | Path,
-    dst_dir: str | Path,
-    filenames: list[str],
-) -> list[str]:
-    """Normalize every named file from src_dir into dst_dir.
-
-    Returns the list of output filenames that normalized successfully.
-    """
-    src_dir = Path(src_dir)
-    dst_dir = Path(dst_dir)
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    done: list[str] = []
-    for name in filenames:
-        src = src_dir / name
-        dst = dst_dir / Path(name).with_suffix(".jpg").name
-        try:
-            normalize_image(src, dst)
-            done.append(dst.name)
-        except ImageNormalizationError:
-            logger.warning("normalization failed for %s", name)
-    return done

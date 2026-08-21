@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 # Telegram media type -> file extension
@@ -36,8 +35,3 @@ def is_supported_mime(mime: str | None) -> bool:
 
 def human_size(bytes_: int) -> str:
     return f"{bytes_ / (1024 * 1024):.2f} MB"
-
-
-def sanitize_filename(name: str) -> str:
-    """Replace characters unsafe for filesystems."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name or "file")
