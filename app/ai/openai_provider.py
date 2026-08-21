@@ -62,8 +62,16 @@ class OpenAIProvider(ReceiptVisionProvider):
         except AIProviderError:
             raise
         except RateLimitError as exc:
+            # Surface the precise 429 reason so operators can distinguish a
+            # temporary rate limit (rate_limit_exceeded — pacing/retry helps)
+            # from a billing/quota block (insufficient_quota — retries never
+            # help; requires topping up or raising the tier).
+            err_type = getattr(exc, "type", None) or getattr(exc, "code", None)
+            err_msg = getattr(exc, "message", None) or str(exc)
+            logger.info("openai 429: type=%r code=%r msg=%s", err_type, getattr(exc, "code", None), err_msg)
             raise AIRateLimitError(
-                f"OpenAI rate limited: {exc}", retry_after=_parse_retry_after(_retry_after_header(exc))
+                f"OpenAI rate limited [{err_type or 'unknown'}]: {err_msg}",
+                retry_after=_parse_retry_after(_retry_after_header(exc)),
             ) from exc
         except Exception as exc:
             raise AIProviderError(f"OpenAI request failed: {exc}") from exc
