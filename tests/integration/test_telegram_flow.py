@@ -108,7 +108,8 @@ def _build(tmp_path, allowed="111", password="secret"):
     config = Config(
         telegram_token="t", allowed_user_ids=allowed, bot_password=password,
         ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, report_title="Heading Travel Expenses", report_period="July Expenses",
+        max_receipts=20, ai_request_delay_seconds=0,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
     )
     transport = FakeTransport()
     telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
@@ -146,8 +147,11 @@ async def test_full_authorized_flow(tmp_path):
 
     gen_msg = FakeMessage("/generate")
     await bot.generate_command(FakeUpdate(gen_msg), None)
+    assert (await sessions.get(111)).state == BotState.AWAITING_HEADING
+    assert "heading" in gen_msg.replies[-1].lower()
+
+    await bot.message_handler(_text_update("July Expenses"), None)
     assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
-    assert "password" in gen_msg.replies[-1].lower()
 
     await bot.message_handler(_text_update("secret"), None)
     assert len(transport.sent_docs) == 1
@@ -174,6 +178,8 @@ async def test_wrong_password_returns_to_idle(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     gen_msg = FakeMessage("/generate")
     await bot.generate_command(FakeUpdate(gen_msg), None)
+    assert (await sessions.get(111)).state == BotState.AWAITING_HEADING
+    await bot.message_handler(_text_update("July Expenses"), None)
     assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
     await bot.message_handler(_text_update("wrongpass"), None)
     session = await sessions.get(111)
@@ -215,7 +221,7 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
     config = Config(
         telegram_token="t", allowed_user_ids="111", bot_password="secret",
         ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, ai_retry_base_delay=0, ai_concurrency=1,
+        max_receipts=20, ai_retry_base_delay=0, ai_concurrency=1, ai_request_delay_seconds=0,
         report_title="Heading Travel Expenses", report_period="July Expenses",
     )
     transport = FakeTransport()
@@ -230,6 +236,7 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f2"), None)
     await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
     await bot.message_handler(_text_update("secret"), None)
 
     assert transport.sent_docs
@@ -256,7 +263,8 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
     config = Config(
         telegram_token="t", allowed_user_ids="111", bot_password="secret",
         ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, report_title="Heading Travel Expenses", report_period="July Expenses",
+        max_receipts=20, ai_request_delay_seconds=0,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
     )
     transport = _FailingSend()
     telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
@@ -275,6 +283,7 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
         await bot.start_command(_text_update("/start"), None)
         await bot.message_handler(_photo_update("f1"), None)
         await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+        await bot.message_handler(_text_update("July Expenses"), None)
         await bot.message_handler(_text_update("secret"), None)
 
         catch_all = [ln for ln in handler.lines if "unhandled processing error" in ln]

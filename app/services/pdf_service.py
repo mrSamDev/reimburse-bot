@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
@@ -27,10 +28,9 @@ logger = logging.getLogger(__name__)
 PAGE = A4
 MARGIN = 40 * mm
 USABLE = PAGE[0] - 2 * MARGIN
-COL_AMOUNT = 130
-COL_RECEIPT = USABLE - COL_AMOUNT
-IMAGE_MAX_WIDTH = COL_RECEIPT - 8
-IMAGE_MAX_HEIGHT = 110
+COL_IMAGE = 118
+COL_CAPTION = USABLE - COL_IMAGE
+IMAGE_MAX_WIDTH = COL_IMAGE - 8
 
 
 def _money(value: Decimal) -> str:
@@ -48,20 +48,8 @@ def _styles() -> dict[str, ParagraphStyle]:
             textColor=colors.grey, spaceAfter=16,
         ),
         "desc": ParagraphStyle(
-            "desc", fontName="Helvetica-Bold", fontSize=11, leading=14,
+            "desc", fontName="Helvetica", fontSize=10, leading=13,
             alignment=TA_LEFT,
-        ),
-        "date": ParagraphStyle(
-            "date", fontName="Helvetica", fontSize=9, leading=12,
-            textColor=colors.HexColor("#555555"),
-        ),
-        "warning": ParagraphStyle(
-            "warning", fontName="Helvetica-Oblique", fontSize=8.5, leading=11,
-            textColor=colors.HexColor("#b45309"),
-        ),
-        "amount": ParagraphStyle(
-            "amount", fontName="Helvetica-Bold", fontSize=11, leading=14,
-            alignment=TA_RIGHT,
         ),
         "head": ParagraphStyle(
             "head", fontName="Helvetica-Bold", fontSize=11, leading=14,
@@ -79,7 +67,7 @@ def _styles() -> dict[str, ParagraphStyle]:
 
 
 def _scaled_image(path: str | Path) -> Image:
-    """Create an Image flowable preserving aspect ratio within caps."""
+    """Create an Image flowable scaled to the receipt column, aspect preserved."""
     from PIL import Image as PILImage
 
     with PILImage.open(path) as im:
@@ -87,24 +75,17 @@ def _scaled_image(path: str | Path) -> Image:
     aspect = h / w if w else 1.0
     width = IMAGE_MAX_WIDTH
     height = width * aspect
-    if height > IMAGE_MAX_HEIGHT:
-        height = IMAGE_MAX_HEIGHT
-        width = height / aspect if aspect else IMAGE_MAX_WIDTH
     return Image(str(path), width=width, height=height)
 
 
-def _receipt_cell(receipt, image_path: str | Path | None) -> list:
-    parts = []
-    if image_path and Path(image_path).exists():
-        parts.append(_scaled_image(image_path))
-        parts.append(Spacer(1, 4))
-    parts.append(Paragraph(receipt.merchant_name, _styles()["desc"]))
+def _caption_cell(receipt) -> Paragraph:
+    """One-line caption: merchant (bold), optional date (grey), amount inline."""
+    name = escape(receipt.merchant_name)
+    caption = f"<b>{name}</b>"
     if receipt.transaction_date:
-        parts.append(Paragraph(receipt.transaction_date, _styles()["date"]))
-    if receipt.review_required:
-        reasons = receipt.notes or "Review required"
-        parts.append(Paragraph(f"⚠ Review required — {reasons}", _styles()["warning"]))
-    return parts
+        caption += f' <font color="#6b7280">{escape(receipt.transaction_date)}</font>'
+    caption += f'<br/><b>{escape(receipt.currency)} {_money(receipt.total)}</b>'
+    return Paragraph(caption, _styles()["desc"])
 
 
 def generate_report(
@@ -140,29 +121,27 @@ def generate_report(
         story.append(Paragraph(period, st["period"]))
 
     # Table: header row + one row per receipt. repeatRows=1 reprints the
-    # "Receipt | Amount" header on every page.
-    header = [
-        [Paragraph("Receipt", st["head"])],
-        [Paragraph("Amount", st["head"])],
-    ]
+    # "Receipt" header on every page.
+    header = [[Paragraph("Receipt", st["head"])], []]
     data_rows = []
     for receipt in batch.receipts:
         image_path = image_map.get(receipt.source_file_id)
-        row = [
-            _receipt_cell(receipt, image_path),
-            [Paragraph(f"{receipt.currency} {_money(receipt.total)}", st["amount"])],
-        ]
-        data_rows.append(row)
+        image_flowable = (
+            _scaled_image(image_path)
+            if image_path and Path(image_path).exists()
+            else ""
+        )
+        data_rows.append([image_flowable, _caption_cell(receipt)])
 
-    table = Table([header] + data_rows, colWidths=[COL_RECEIPT, COL_AMOUNT], repeatRows=1)
+    table = Table([header] + data_rows, colWidths=[COL_IMAGE, COL_CAPTION], repeatRows=1)
     table.setStyle(
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LINEBELOW", (0, 1), (-1, -1), 0.4, colors.HexColor("#cccccc")),
                 ("LINEBELOW", (0, 0), (1, 0), 1, colors.HexColor("#999999")),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ]
@@ -171,7 +150,7 @@ def generate_report(
     story.append(table)
 
     # Totals section. Never combine different currencies into one total.
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 14))
     if len(batch.currencies()) == 1:
         currency = batch.currencies()[0]
         total = batch.currency_totals[currency]

@@ -63,7 +63,8 @@ python -m app.main         # start long polling
 | `DATA_DIR` | Persistent data root (holds the `receipts.db` audit ledger) |
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
-| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 2) |
+| `AI_REQUEST_DELAY_SECONDS` | Pause between consecutive receipts; 0 disables (default 1.0) |
+| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1 — one at a time) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 300) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |
@@ -82,8 +83,8 @@ python -m app.main         # start long polling
 | `/help` | Show help |
 | `/status` | "Receipts staged: N" |
 | `/clear` | Clear staged receipts |
-| `/generate` | Ask for the password, then build + send the PDF |
-| `/cancel` | Cancel the password flow |
+| `/generate` | Ask for a report heading + password, then build & send the PDF |
+| `/cancel` | Cancel the current flow (heading or password) |
 
 Send a photo or a JPEG/PNG/WEBP image document to stage a receipt.
 

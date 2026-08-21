@@ -11,7 +11,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.ai.base import AIProviderError, ReceiptExtraction, ReceiptVisionProvider
+from app.ai.base import (
+    AIProviderError,
+    AIRateLimitError,
+    ReceiptExtraction,
+    ReceiptVisionProvider,
+)
 from app.ai.validation import AIValidationError, validate_extraction
 from app.config import Config
 from app.models.receipt import Batch, Receipt
@@ -31,6 +36,9 @@ RECEIPT_FAILURE_EXCEPTIONS = (
     AIValidationError,
     file_validation.FileValidationError,
 )
+
+# Upper bound (seconds) for rate-limit backoff, applied before jitter.
+MAX_RATE_LIMIT_DELAY = 60.0
 
 
 class ProcessingError(Exception):
@@ -85,11 +93,24 @@ async def _extract_with_retry(
     returned data that failed hard checks. Backoff uses full jitter to avoid a
     thundering herd on a recovering provider. Raises after ``max_attempts``.
     ``_sleep``/``_random`` are injectable for deterministic tests.
+
+    Rate-limit responses (HTTP 429) are retried with a longer backoff that
+    respects the server's ``Retry-After`` hint, capped at :data:`MAX_RATE_LIMIT_DELAY`.
+    Other :class:`AIProviderError` failures use full-jitter exponential backoff.
     """
     for attempt in range(max_attempts):
         metrics.inc("ai_calls")
         try:
             return await asyncio.to_thread(provider.extract_receipt, image_path)
+        except AIRateLimitError as exc:
+            metrics.inc("ai_rate_limited")
+            if attempt == max_attempts - 1:
+                raise
+            retry_after = getattr(exc, "retry_after", None)
+            delay = retry_after if retry_after is not None else base_delay * (2**attempt)
+            delay = min(delay, MAX_RATE_LIMIT_DELAY)
+            delay = delay * (1 + _rand())
+            await _sleep(delay)
         except AIProviderError:
             metrics.inc("ai_errors")
             if attempt == max_attempts - 1:
@@ -146,6 +167,8 @@ class ProcessingService:
         file_ids: list[str],
         request_base: Path | None = None,
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        *,  # keyword-only: positional callers keep working unchanged
+        title: str = "",
     ) -> ProcessingResult:
         if not file_ids:
             raise ProcessingError("No receipts to process")
@@ -190,7 +213,16 @@ class ProcessingService:
 
                 async def _limited(file_id, idx):
                     async with sem:
-                        return await self._process_one(file_id, idx, input_dir, normalized_dir)
+                        result = await self._process_one(file_id, idx, input_dir, normalized_dir)
+                        # Pause before the next request so requests are spaced
+                        # ``ai_request_delay_seconds`` apart (1-by-1 when
+                        # concurrency=1). Holding the semaphore during the sleep
+                        # guarantees the gap is real, not absorbed by overlap.
+                        if idx < len(file_ids) - 1:
+                            delay = self._config.ai_request_delay_seconds
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                        return result
 
                 gather = asyncio.gather(
                     *(_limited(file_id, idx) for idx, file_id in enumerate(file_ids))
@@ -262,7 +294,7 @@ class ProcessingService:
                     generate_report,
                     batch,
                     out_pdf,
-                    title=self._config.report_title,
+                    title=title or self._config.report_title,
                     period=self._config.report_period,
                     image_map=image_map,
                 )
@@ -329,6 +361,8 @@ async def run_with_cleanup(
     deliver=None,
     request_id: str | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    *,
+    title: str = "",
 ) -> ProcessingResult:
     """Run processing, deliver the report, then guarantee cleanup.
 
@@ -342,7 +376,7 @@ async def run_with_cleanup(
     base = make_request_base(temp_root, request_id)
     try:
         result = await service.process(
-            user_id, file_ids, request_base=base, on_progress=on_progress
+            user_id, file_ids, request_base=base, on_progress=on_progress, title=title
         )
         if deliver is not None:
             await deliver(result)

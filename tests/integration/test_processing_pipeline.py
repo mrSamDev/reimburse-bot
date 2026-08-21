@@ -62,6 +62,7 @@ def _config(tmp: Path, max_receipts: int = 20) -> Config:
         ai_provider="openai", openai_api_key="x", temp_dir=tmp, max_receipts=max_receipts,
         report_title="Heading Travel Expenses", report_period="July Expenses",
         ai_retry_base_delay=0,  # keep integration tests fast (no real backoff sleeps)
+        ai_request_delay_seconds=0,  # no pacing gap between receipts in tests
         ai_concurrency=1,  # sequential: keeps sequence-based tests deterministic
     )
 
@@ -90,6 +91,40 @@ async def test_full_pipeline_success(tmp_path):
     assert delivered["exists"] is True
     # After cleanup the request dir is gone.
     assert not result.request_base.exists()
+
+
+async def test_custom_title_lands_in_pdf(tmp_path):
+    from pypdf import PdfReader
+
+    cfg = _config(tmp_path)
+    text = ""
+
+    async def deliver(result):
+        nonlocal text
+        text = " ".join((p.extract_text() or "") for p in PdfReader(str(result.out_pdf_path)).pages)
+        text = " ".join(text.split())
+
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "53.50")]), FakeTelegram())
+    await run_with_cleanup(
+        svc, 1, ["f1"], cfg.temp_dir, title="July Expenses", deliver=deliver
+    )
+    assert "July Expenses" in text
+
+
+async def test_custom_title_falls_back_to_config(tmp_path):
+    from pypdf import PdfReader
+
+    cfg = _config(tmp_path)
+    text = ""
+
+    async def deliver(result):
+        nonlocal text
+        text = " ".join((p.extract_text() or "") for p in PdfReader(str(result.out_pdf_path)).pages)
+        text = " ".join(text.split())
+
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "53.50")]), FakeTelegram())
+    await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir, deliver=deliver)
+    assert "Heading Travel Expenses" in text
 
 
 async def test_single_failing_receipt_does_not_destroy_batch(tmp_path):

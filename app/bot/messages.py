@@ -13,12 +13,16 @@ HELP = (
     "/generate - Create your reimbursement report\n"
     "/cancel - Cancel the current flow\n\n"
     "Send a receipt photo or image document to stage it. Your receipts stay in "
-    "Telegram until you run /generate with your password."
+    "Telegram until you run /generate, set a report heading and enter your password."
 )
 
 STARTED = "Ready. Send me receipt photos, or use /help for commands."
 
 PASSWORD_PROMPT = "Enter your reimbursement password."
+
+HEADING_PROMPT = "What heading should I use for the PDF report? (e.g., July Expenses)"
+
+HEADING_EMPTY = "Please send a text heading for the report."
 
 WRONG_PASSWORD = "Incorrect password. The password flow has been cancelled."
 

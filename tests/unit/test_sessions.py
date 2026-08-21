@@ -315,20 +315,16 @@ async def test_post_init_starts_and_cancels_maintenance_task(tmp_path):
         def __init__(self):
             self.post_init = None
             self.post_shutdown = None
-            self._maintenance_task = None
 
     app = _FakeApp()
     post_init = _make_post_init(store, 0.01)
     await post_init(app)
     assert app.post_shutdown is not None
-    assert app._maintenance_task is not None
     await asyncio.sleep(0.06)  # let the task run its sweep
     # The abandoned lease was reclaimed by the scheduled task.
     assert await store.try_acquire_processing(1) is True
-    # Shutdown cancels the task cleanly.
+    # Shutdown cancels and reaps the task cleanly.
     await app.post_shutdown(app)
-    with pytest.raises(asyncio.CancelledError):
-        await app._maintenance_task
 
 
 

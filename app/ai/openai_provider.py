@@ -8,19 +8,28 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app.ai.base import AIProviderError, ReceiptExtraction, ReceiptVisionProvider
+from app.ai.base import (
+    AIProviderError,
+    AIRateLimitError,
+    ReceiptExtraction,
+    ReceiptVisionProvider,
+)
 from app.config import Config
 
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "receipt_extraction.txt"
 
+from openai import RateLimitError  # noqa: E402  (hard runtime dependency)
+
 
 class OpenAIProvider(ReceiptVisionProvider):
     def __init__(self, config: Config) -> None:
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=config.openai_api_key)
+        # max_retries=0: the SDK's built-in auto-retry is disabled so we fully
+        # control pacing/backoff (see _extract_with_retry in receipt_service).
+        self._client = OpenAI(api_key=config.openai_api_key, max_retries=0)
         self._model = config.openai_model or "gpt-4o-mini"
         self._timeout = config.ai_timeout_seconds
         self._prompt = PROMPT_PATH.read_text(encoding="utf-8")
@@ -52,8 +61,43 @@ class OpenAIProvider(ReceiptVisionProvider):
             return ReceiptExtraction(**parsed)
         except AIProviderError:
             raise
+        except RateLimitError as exc:
+            raise AIRateLimitError(
+                f"OpenAI rate limited: {exc}", retry_after=_parse_retry_after(_retry_after_header(exc))
+            ) from exc
         except Exception as exc:
             raise AIProviderError(f"OpenAI request failed: {exc}") from exc
+
+
+def _retry_after_header(exc) -> str | None:
+    """Pull the Retry-After header off an OpenAI status error, if present."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    headers = response.headers if hasattr(response, "headers") else {}
+    return headers.get("retry-after") or headers.get("Retry-After")
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse Retry-After into seconds.
+
+    Accepts a decimal seconds string ("0.38") or an HTTP-date form
+    ("Wed, 21 Oct 2015 07:28:00 GMT"). Returns None when unparseable.
+    """
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(value)
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
 
 
 def _extract_json(content: str) -> dict[str, Any]:

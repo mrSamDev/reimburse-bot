@@ -38,18 +38,25 @@ async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
 def _make_post_init(sessions: SessionStore, interval_seconds: float):
     """Return a ``post_init`` that starts the maintenance task and tracks it.
 
-    Uses ``asyncio.get_running_loop().create_task`` directly (not
-    ``Application.create_task``) so the task is actually tracked/cancelled at
-    shutdown instead of firing PTB's "won't be awaited" warning.
+    PTB's ``Application`` uses ``__slots__``, so the task reference is held in a
+    closure (never attached to the app object). ``post_shutdown`` cancels and
+    awaits the task so it is reaped cleanly at shutdown instead of leaking.
     """
-    async def _post_init(application) -> None:
-        async def _post_shutdown(_app) -> None:
-            task = getattr(_app, "_maintenance_task", None)
-            if task is not None:
-                task.cancel()
+    holder: dict = {"task": None}
 
+    async def _post_shutdown(_app) -> None:
+        task = holder["task"]
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
-        application._maintenance_task = asyncio.get_running_loop().create_task(
+        holder["task"] = asyncio.get_running_loop().create_task(
             _maintenance_loop(sessions.sweep, interval_seconds)
         )
 

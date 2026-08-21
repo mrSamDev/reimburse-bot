@@ -72,12 +72,14 @@ def test_twenty_receipts_multipage(tmp_path):
     assert "Total: AED 210.00" in text
 
 
-def test_review_warning_shown(tmp_path):
+def test_review_warning_hidden_in_pdf(tmp_path):
+    # Per-receipt review warnings are not rendered in the PDF; the human gets
+    # the review count from the Telegram message instead.
     r = _r("Low conf", "10.00", confidence=0.2, notes="blurry", review_required=True)
     b = _batch([r])
     out = generate_report(b, tmp_path / "review.pdf")
-    text = _text(out)
-    assert "Review required" in text
+    assert "Review required" not in _text(out)
+    assert "blurry" not in _text(out)
 
 
 def test_image_aspect_preserved_no_distortion(tmp_path):

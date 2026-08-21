@@ -62,11 +62,29 @@ def test_generate_no_password_configured():
     assert reply == msg.NO_PASSWORD_CONFIGURED
 
 
-def test_generate_prompts_password():
+def test_generate_prompts_heading():
     s = _session_with(["f1"])
     state, reply = logic.handle_generate(s, has_password=True, processing=False)
+    assert state == BotState.AWAITING_HEADING
+    assert reply == msg.HEADING_PROMPT
+
+
+def test_heading_stores_title_and_prompts_password():
+    s = Session(user_id=1, chat_id=1, state=BotState.AWAITING_HEADING)
+    state, reply, valid = logic.handle_heading(s, "  July Expenses  ")
+    assert valid is True
+    assert s.report_title == "July Expenses"
     assert state == BotState.AWAITING_PASSWORD
     assert reply == msg.PASSWORD_PROMPT
+
+
+def test_heading_empty_rejects():
+    s = Session(user_id=1, chat_id=1, state=BotState.AWAITING_HEADING)
+    state, reply, valid = logic.handle_heading(s, "   ")
+    assert valid is False
+    assert state == BotState.AWAITING_HEADING
+    assert reply == msg.HEADING_EMPTY
+    assert s.report_title == ""
 
 
 def test_generate_busy():

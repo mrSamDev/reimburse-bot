@@ -26,6 +26,7 @@ class Session(BaseModel):
     chat_id: int
     state: BotState = BotState.IDLE
     receipt_file_ids: list[str] = Field(default_factory=list)
+    report_title: str = ""
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -42,6 +43,7 @@ class Session(BaseModel):
 
     def clear_receipts(self) -> None:
         self.receipt_file_ids = []
+        self.report_title = ""
         self.touch()
 
     def is_expired(self, ttl_seconds: int, *, now: datetime | None = None) -> bool:

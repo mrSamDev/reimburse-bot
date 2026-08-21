@@ -13,6 +13,7 @@ _METRICS: dict[str, int] = {
     "delivered": 0,
     "ai_calls": 0,
     "ai_errors": 0,
+    "ai_rate_limited": 0,
 }
 
 

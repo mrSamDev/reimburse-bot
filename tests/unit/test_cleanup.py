@@ -59,7 +59,7 @@ class _FakeService:
         self.called = False
         self.base = None
 
-    async def process(self, user_id, file_ids, request_base=None, on_progress=None):
+    async def process(self, user_id, file_ids, request_base=None, on_progress=None, *, title=""):
         self.called = True
         self.base = request_base
         if self.behavior == "error":

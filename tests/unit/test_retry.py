@@ -4,7 +4,11 @@ import asyncio
 
 import pytest
 
-from app.ai.base import AIProviderError, ReceiptExtraction
+from app.ai.base import (
+    AIProviderError,
+    AIRateLimitError,
+    ReceiptExtraction,
+)
 from app.services.receipt_service import _extract_with_retry
 
 _DEFAULT_EXC = AIProviderError("boom")
@@ -91,3 +95,54 @@ def test_single_attempt_does_not_retry():
     with pytest.raises(AIProviderError):
         asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=1, base_delay=0))
     assert provider.calls == 1
+
+
+def test_rate_limit_respects_retry_after():
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    # Server asks for 0.5s; jitter multiplies by (1 + rand).
+    provider = _FlakyProvider(fail_for=1, exc=AIRateLimitError("rl", retry_after=0.5))
+    result = asyncio.run(
+        _extract_with_retry(
+            provider, "/img.jpg", max_attempts=3, base_delay=1.0,
+            _sleep=fake_sleep, _rand=lambda: 1.0,
+        )
+    )
+    assert result.merchant_name == "M"
+    assert sleeps == [1.0]  # 0.5 * (1 + 1.0)
+
+
+def test_rate_limit_fallback_backoff_capped():
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    # No retry-after hint -> exponential fallback base_delay*(2**attempt),
+    # capped at MAX_RATE_LIMIT_DELAY before jitter.
+    from app.services.receipt_service import MAX_RATE_LIMIT_DELAY
+
+    provider = _FlakyProvider(fail_for=2, exc=AIRateLimitError("rl"))
+    asyncio.run(
+        _extract_with_retry(
+            provider, "/img.jpg", max_attempts=3, base_delay=50.0,
+            _sleep=fake_sleep, _rand=lambda: 0.0,
+        )
+    )
+    # attempt 0: 50*1=50 capped 50; attempt 1: 50*2=100 capped 60.
+    assert sleeps == [50.0, MAX_RATE_LIMIT_DELAY]
+
+
+def test_rate_limit_exhausts_attempts_and_raises():
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    provider = _FlakyProvider(fail_for=99, exc=AIRateLimitError("rl", retry_after=0.2))
+    with pytest.raises(AIRateLimitError):
+        asyncio.run(
+            _extract_with_retry(
+                provider, "/img.jpg", max_attempts=3, base_delay=1.0,
+                _sleep=fake_sleep, _rand=lambda: 0.0,
+            )
+        )
+    assert provider.calls == 3
+    assert len(sleeps) == 2

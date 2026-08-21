@@ -41,7 +41,16 @@ def handle_generate(session, *, has_password: bool, processing: bool) -> tuple:
         return session.state, msg.NO_RECEIPTS
     if not has_password:
         return session.state, msg.NO_PASSWORD_CONFIGURED
-    return BotState.AWAITING_PASSWORD, msg.PASSWORD_PROMPT
+    return BotState.AWAITING_HEADING, msg.HEADING_PROMPT
+
+
+def handle_heading(session, candidate: str) -> tuple:
+    """Return (new_state, reply, valid_bool)."""
+    title = (candidate or "").strip()
+    if not title:
+        return BotState.AWAITING_HEADING, msg.HEADING_EMPTY, False
+    session.report_title = title
+    return BotState.AWAITING_PASSWORD, msg.PASSWORD_PROMPT, True
 
 
 def handle_password(session, candidate: str, *, security) -> tuple:

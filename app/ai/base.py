@@ -52,6 +52,18 @@ class AIProviderError(Exception):
     """Raised when a vision provider fails (timeout, transport, parse)."""
 
 
+class AIRateLimitError(AIProviderError):
+    """Raised when the provider rate-limits the request (HTTP 429).
+
+    ``retry_after`` carries the server's parsed ``Retry-After`` hint in seconds
+    (if available); retry logic uses it to pace re-attempts.
+    """
+
+    def __init__(self, message: str = "rate limited", retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class ReceiptVisionProvider(ABC):
     """Interface every vision provider must implement.
 

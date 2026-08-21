@@ -12,6 +12,7 @@ from app.bot.logic import (
     handle_cancel,
     handle_clear,
     handle_generate,
+    handle_heading,
     handle_help,
     handle_password,
     handle_receipt,
@@ -143,6 +144,10 @@ class ReimbursementBot:
             await self._password_attempt(update, session)
             return
 
+        if session.state == BotState.AWAITING_HEADING:
+            await self._heading_attempt(update, session)
+            return
+
         # Otherwise it's a receipt upload (photo or image document).
         file_id, mime, is_image = self._extract_file(update)
         if file_id is None:
@@ -181,7 +186,18 @@ class ReimbursementBot:
             return None, mime, False
         return None, None, False
 
-    # ---- password & processing --------------------------------------------
+    # ---- heading, password & processing -----------------------------------
+    async def _heading_attempt(self, update, session) -> None:
+        candidate = self._candidate_text(update)
+        new_state, reply, valid = handle_heading(session, candidate)
+        session.state = new_state
+        await self.sessions.save(session)
+        if reply:
+            await self._reply(update, reply)
+        if valid:
+            # Heading captured; now prompt for the password.
+            return
+
     async def _password_attempt(self, update, session) -> None:
         candidate = self._candidate_text(update)
         new_state, reply, correct = handle_password(session, candidate, security=self.security)
@@ -232,6 +248,7 @@ class ReimbursementBot:
                         self.config.temp_dir,
                         deliver=deliver,
                         request_id=request_id,
+                        title=session.report_title,
                     )
                     session.state = BotState.IDLE
                 except ProcessingError:
@@ -272,7 +289,7 @@ class ReimbursementBot:
         if failures:
             reasons = "; ".join(f["reason"] for f in failures)
             caption += f"\n\nCould not process {len(failures)} receipt(s): {reasons}"
-        return caption
+        return _clamp_caption(caption)
 
 
     async def _reply(self, update, text: str) -> None:
@@ -288,3 +305,14 @@ def _fmt(value) -> str:
     from decimal import Decimal
 
     return f"{Decimal(value):,.2f}"
+
+
+# Telegram media captions are limited to 1024 characters. Captions that exceed
+# this (e.g. many failed-receipt reasons) are trimmed with a trailing ellipsis.
+MAX_CAPTION_CHARS = 1024
+
+
+def _clamp_caption(caption: str) -> str:
+    if len(caption) <= MAX_CAPTION_CHARS:
+        return caption
+    return caption[: MAX_CAPTION_CHARS - 1].rstrip() + "…"
