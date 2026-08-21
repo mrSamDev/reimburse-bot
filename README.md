@@ -70,6 +70,8 @@ python -m app.main         # start long polling
 | `AI_PER_RECEIPT_TIMEOUT_SECONDS` | Hard per-receipt processing timeout (default 120) |
 | `LOG_FORMAT` | `text` or `json` structured logs (default `text`) |
 | `BACKUP_DIR` | Directory for durable DB backups (default `backups/`) |
+| `HEALTH_ENABLED` | Serve `/health` + `/metrics` on `HEALTH_PORT` (default `false`) |
+| `HEALTH_PORT` | HTTP port for the health/metrics server (default 8080) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
 
 ## Commands
@@ -144,6 +146,13 @@ live database, and start it again:
 ```bash
 cp backups/receipts_receipts_20240101_120000.db data/receipts.db
 ```
+
+## Health & metrics
+
+With `HEALTH_ENABLED=true`, a zero-dependency HTTP server serves:
+- `GET /health` → `{"status":"ok"}`
+- `GET /metrics` → JSON of the in-process counters
+  (`processed`, `review`, `failed`, `delivered`, `ai_calls`, `ai_errors`)
 
 ## Production checklist
 

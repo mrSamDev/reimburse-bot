@@ -54,6 +54,8 @@ class Config(BaseModel):
     maintenance_interval_seconds: int = 60
     log_level: str = "INFO"
     log_format: str = "text"
+    health_enabled: bool = False
+    health_port: int = 8080
     report_title: str = "Heading Travel Expenses"
     report_period: str = ""
 
@@ -130,6 +132,13 @@ class Config(BaseModel):
     def _check_per_receipt_timeout(cls, v: int) -> int:
         if v < 1:
             raise ValueError("ai_per_receipt_timeout_seconds must be >= 1")
+        return v
+
+    @field_validator("health_port")
+    @classmethod
+    def _check_health_port(cls, v: int) -> int:
+        if not (0 <= v <= 65535):
+            raise ValueError("health_port must be a valid TCP port")
         return v
 
     @field_validator("maintenance_interval_seconds")
@@ -220,6 +229,8 @@ def _from_env() -> dict[str, Any]:
         "maintenance_interval_seconds": int(get("MAINTENANCE_INTERVAL_SECONDS", "60")),
         "log_level": get("LOG_LEVEL", "INFO"),
         "log_format": get("LOG_FORMAT", "text"),
+        "health_enabled": (get("HEALTH_ENABLED", "false") or "false").lower() in ("1", "true", "yes"),
+        "health_port": int(get("HEALTH_PORT", "8080")),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
         "report_period": get("REPORT_PERIOD", ""),
     }

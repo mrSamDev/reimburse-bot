@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 from dotenv import load_dotenv
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
@@ -12,6 +13,7 @@ from app.ai.ollama_provider import build_provider
 from app.bot.bot import ReimbursementBot
 from app.config import PROJECT_ROOT, Config, ConfigError, load_config
 from app.services.cleanup_service import sweep_orphaned_requests
+from app.services.health_server import create_health_server
 from app.services.ledger_service import ReceiptLedger
 from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
@@ -84,6 +86,16 @@ def build_application(
     return app
 
 
+def _start_health_server(config: Config) -> None:
+    """Serve ``/health`` and ``/metrics`` in a daemon thread if enabled."""
+    if not config.health_enabled:
+        return
+    server = create_health_server(port=config.health_port)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("health server listening on :%d", config.health_port)
+
+
 def main() -> None:
     # Load the local .env (never commit it). Values are read into the env and
     # then parsed by load_config().
@@ -124,6 +136,7 @@ def main() -> None:
 
     application = build_application(config, sessions=sessions, ledger=ledger)
     application.post_init = _make_post_init(sessions, config.maintenance_interval_seconds)
+    _start_health_server(config)
     application.run_polling(drop_pending_updates=True)
 
 
