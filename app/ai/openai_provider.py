@@ -69,7 +69,7 @@ def _extract_json(content: str) -> dict[str, Any]:
         # Fall back to the first {...} block.
         start, end = text.find("{"), text.rfind("}")
         if start == -1 or end == -1:
-            raise AIProviderError("AI returned no parseable JSON")
+            raise AIProviderError("AI returned no parseable JSON") from None
         obj = json.loads(text[start : end + 1])
     if not isinstance(obj, dict):
         raise AIProviderError("AI response was not a JSON object")

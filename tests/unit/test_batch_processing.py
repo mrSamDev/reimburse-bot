@@ -1,6 +1,5 @@
 """Tests for batch processing semantics."""
 
-from decimal import Decimal
 
 from app.models.receipt import Batch, Receipt
 
@@ -26,8 +25,6 @@ def test_batch_tracks_failed_count():
 
 def test_batch_independent_failure_tracking():
     # One bad receipt should not destroy the batch.
-    good = Receipt(merchant_name="A", total="10")
-    good2 = Receipt(merchant_name="B", total="20")
     b = Batch()
     b.processed_count = 2
     b.failed_count = 1

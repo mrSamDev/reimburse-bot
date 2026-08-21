@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from dotenv import load_dotenv
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
 
 from app.ai.ollama_provider import build_provider
 from app.bot.bot import ReimbursementBot
@@ -51,7 +51,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("clear", bot.clear_command))
     app.add_handler(CommandHandler("cancel", bot.cancel_command))
     app.add_handler(CommandHandler("generate", bot.generate_command))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.DOCUMENT | filters.TEXT, bot.message_handler))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.TEXT, bot.message_handler))
     return app
 
 
@@ -63,9 +63,9 @@ def main() -> None:
         config = load_config()
         config.validate_operational()
     except ConfigError as exc:
-        raise SystemExit(f"Configuration error: {exc}")
+        raise SystemExit(f"Configuration error: {exc}") from exc
     except ValueError as exc:
-        raise SystemExit(f"Configuration error: {exc}")
+        raise SystemExit(f"Configuration error: {exc}") from exc
 
     # A hard kill (SIGKILL/OOM) can leave orphaned request dirs behind from a
     # previous run; sweep them before polling so the temp filesystem never fills.

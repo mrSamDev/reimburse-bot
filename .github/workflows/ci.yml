@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Match the Docker image runtime (python:3.12-slim). Testing 3.14 while
+    # shipping 3.12 is exactly the version-skew bug we want to catch here.
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check app tests
+
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Test (pytest)
+        run: pytest -q
+
+      - name: Dependency audit (pip-audit)
+        run: pip-audit

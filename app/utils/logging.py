@@ -8,7 +8,6 @@ import re
 import sys
 from contextlib import contextmanager
 
-
 # The id of the in-flight receipt-processing request. When set, every log
 # record emitted within the scope is tagged so failures are attributable.
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar(

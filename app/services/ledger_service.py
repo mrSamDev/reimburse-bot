@@ -100,7 +100,7 @@ class ReceiptLedger:
             conn.close()
         out = []
         for r in rows:
-            d = dict(zip(cols, r))
+            d = dict(zip(cols, r, strict=True))
             if d.get("total") is not None:
                 d["total"] = Decimal(d["total"])
             out.append(d)

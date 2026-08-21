@@ -7,13 +7,15 @@ import pytest
 from app.ai.base import AIProviderError, ReceiptExtraction
 from app.services.receipt_service import _extract_with_retry
 
+_DEFAULT_EXC = AIProviderError("boom")
+
 
 class _FlakyProvider:
     """Fails on the first `fail_for` calls, then succeeds."""
 
-    def __init__(self, fail_for=1, exc=AIProviderError("boom")):
+    def __init__(self, fail_for=1, exc=None):
         self.fail_for = fail_for
-        self.exc = exc
+        self.exc = exc if exc is not None else _DEFAULT_EXC
         self.calls = 0
 
     def extract_receipt(self, image_path):

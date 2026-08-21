@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from app.bot.locks import UserLockManager
 
 

@@ -215,7 +215,7 @@ class ReimbursementBot:
                 deliver=deliver,
             )
             session.state = BotState.IDLE
-        except ProcessingError as exc:
+        except ProcessingError:
             await self._reply(update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown"))
             session.state = BotState.IDLE
         except Exception:

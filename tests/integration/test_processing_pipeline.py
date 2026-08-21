@@ -9,7 +9,6 @@ from PIL import Image
 
 from app.ai.base import AIProviderError, ReceiptExtraction
 from app.config import Config
-from app.services import file_validation
 from app.services.ledger_service import ReceiptLedger
 from app.services.receipt_service import (
     ProcessingError,

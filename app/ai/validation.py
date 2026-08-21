@@ -6,8 +6,8 @@ import logging
 
 from pydantic import ValidationError
 
-from app.ai.base import AIProviderError, ReceiptExtraction
-from app.models.receipt import Receipt
+from app.ai.base import ReceiptExtraction
+from app.models.receipt import DEFAULT_CURRENCY, Receipt
 from app.services.financial_validation import apply_assessment
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ def validate_extraction(extraction: ReceiptExtraction, source_file_id: str) -> R
         receipt = Receipt(
             merchant_name=merchant,
             transaction_date=extraction.transaction_date,
-            currency=extraction.currency,
+            currency=extraction.currency or DEFAULT_CURRENCY,
             subtotal=extraction.subtotal,
             tax=extraction.tax,
             discount=extraction.discount,

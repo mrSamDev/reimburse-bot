@@ -161,6 +161,10 @@ class ProcessingService:
                         logger.info("receipt failed: %s", outcome.reason)
                         continue
                     receipt = outcome.receipt
+                    if receipt is None:
+                        # Defensive: a successful outcome should always carry a receipt.
+                        failed += 1
+                        continue
                     batch.add(receipt)
                     image_map[receipt.source_file_id] = str(
                         normalized_dir / f"receipt_{idx:03d}.jpg"

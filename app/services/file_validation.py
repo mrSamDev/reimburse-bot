@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.utils import files as file_utils
 
@@ -36,7 +37,7 @@ class FileValidation:
 
 
 def validate_downloaded_image(
-    path: str,
+    path: str | Path,
     *,
     max_size_mb: int = 10,
 ) -> FileValidation:
@@ -44,8 +45,6 @@ def validate_downloaded_image(
 
     Checks MIME type by magic bytes, size and Pillow-decodability + dimensions.
     """
-    from pathlib import Path
-
     p = Path(path)
     size_bytes = p.stat().st_size
     if size_bytes > max_size_mb * 1024 * 1024:

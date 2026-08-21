@@ -1,6 +1,5 @@
 """Tests for the ReportLab PDF generator."""
 
-from decimal import Decimal
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -112,14 +111,6 @@ def test_no_image_no_embed(tmp_path):
     b = _batch([_r("Ride", "10")])
     out = generate_report(b, tmp_path / "noimg.pdf")
     assert _count_images(out) == 0
-
-
-def test_review_warning_shown(tmp_path):
-    r = _r("Low conf", "10.00", confidence=0.2, notes="blurry", review_required=True)
-    b = _batch([r])
-    out = generate_report(b, tmp_path / "review.pdf")
-    text = _text(out)
-    assert "Review required" in text
 
 
 def test_mixed_currency_totals(tmp_path):

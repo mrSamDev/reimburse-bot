@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -22,7 +22,7 @@ def _to_decimal(value: Any) -> Decimal | None:
         # Use Decimal(str(...)) to avoid binary-float artifacts.
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
-        raise ValueError(f"Invalid monetary value: {value!r}")
+        raise ValueError(f"Invalid monetary value: {value!r}") from None
 
 
 class Receipt(BaseModel):
@@ -39,11 +39,11 @@ class Receipt(BaseModel):
     )
 
     merchant_name: str
-    transaction_date: Optional[str] = None
+    transaction_date: str | None = None
     currency: str = DEFAULT_CURRENCY
-    subtotal: Optional[Decimal] = None
-    tax: Optional[Decimal] = None
-    discount: Optional[Decimal] = None
+    subtotal: Decimal | None = None
+    tax: Decimal | None = None
+    discount: Decimal | None = None
     total: Decimal
     confidence: float = 1.0
     review_required: bool = False
@@ -103,7 +103,7 @@ class Receipt(BaseModel):
         try:
             f = float(v)
         except (TypeError, ValueError):
-            raise ValueError(f"Invalid confidence: {v!r}")
+            raise ValueError(f"Invalid confidence: {v!r}") from None
         return f
 
     @field_validator("confidence")

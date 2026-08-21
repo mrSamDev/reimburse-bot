@@ -44,10 +44,6 @@ class TestFileValidation:
             validate_downloaded_image(p, max_size_mb=10)
 
     def test_unsupported_mime_rejected(self, tmp_path):
-        p = make_image(tmp_path / "note.png", "PNG")  # valid but we force mime logic
-        # simulate a non-image extension/mime
-        from app.services import file_validation
-
         p2 = tmp_path / "fake.pdf"
         p2.write_bytes(b"%PDF-1.4 fake")
         with pytest.raises((CorruptImageError, UnsupportedTypeError)):

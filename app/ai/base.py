@@ -5,11 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from app.models.receipt import _to_decimal
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class ReceiptExtraction(BaseModel):
@@ -21,13 +19,13 @@ class ReceiptExtraction(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
 
-    merchant_name: Optional[str] = None
-    transaction_date: Optional[str] = None
-    currency: Optional[str] = None
-    subtotal: Optional[Decimal] = None
-    tax: Optional[Decimal] = None
-    discount: Optional[Decimal] = None
-    total: Optional[Decimal] = None
+    merchant_name: str | None = None
+    transaction_date: str | None = None
+    currency: str | None = None
+    subtotal: Decimal | None = None
+    tax: Decimal | None = None
+    discount: Decimal | None = None
+    total: Decimal | None = None
     confidence: float = 0.0
     notes: str = ""
 

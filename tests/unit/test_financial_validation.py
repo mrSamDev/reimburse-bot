@@ -5,8 +5,8 @@ from decimal import Decimal
 from app.models.receipt import Receipt
 from app.services.financial_validation import (
     LOW_CONFIDENCE,
-    assess_receipt,
     apply_assessment,
+    assess_receipt,
 )
 
 

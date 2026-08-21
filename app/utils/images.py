@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from PIL import Image, ImageOps
 
@@ -34,14 +33,15 @@ def normalize_image(
     src = Path(src)
     dst = Path(dst)
     try:
-        with Image.open(src) as im:
+        im: Image.Image = Image.open(src)
+        with im:
             im = ImageOps.exif_transpose(im)
             im = im.convert("RGB")
             if max(im.size) > max_edge:
                 scale = max_edge / float(max(im.size))
                 im = im.resize(
                     (int(im.width * scale), int(im.height * scale)),
-                    Image.LANCZOS,
+                    Image.Resampling.LANCZOS,
                 )
             im.save(dst, format=OUTPUT_FORMAT, quality=OUTPUT_QUALITY)
     except Exception as exc:  # PIL raises many exception types for corrupt input

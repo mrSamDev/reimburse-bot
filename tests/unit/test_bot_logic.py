@@ -1,6 +1,7 @@
 """Tests for the pure bot decision logic."""
 
-from app.bot import logic, messages as msg
+from app.bot import logic
+from app.bot import messages as msg
 from app.bot.states import BotState
 from app.config import Config
 from app.models.session import Session

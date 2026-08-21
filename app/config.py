@@ -117,7 +117,7 @@ class Config(BaseModel):
     def requires_telegram(self) -> bool:
         return bool(self.telegram_token)
 
-    def validate_operational(self) -> "Config":
+    def validate_operational(self) -> Config:
         """Run checks needed before the bot can actually process receipts.
 
         Credentials are optional at parse time so config can be constructed and
@@ -181,7 +181,8 @@ def load_config(env_file: str | Path | None = None, *, strict: bool = True) -> C
 
         values = dotenv_values(env_file)
         for k, v in values.items():
-            os.environ.setdefault(k, v)
+            if v is not None:
+                os.environ.setdefault(k, v)
     try:
         cfg = Config(**_from_env())
         if strict:

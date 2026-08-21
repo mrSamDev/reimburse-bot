@@ -1,6 +1,5 @@
 """Tests for the AI providers (stubbed transport)."""
 
-import json
 
 import pytest
 

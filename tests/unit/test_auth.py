@@ -1,6 +1,5 @@
 """Tests for authorization (security_service)."""
 
-import pytest
 
 from app.config import Config
 from app.services.security_service import SecurityService

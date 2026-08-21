@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 
 from app.config import (
+    SUPPORTED_PROVIDERS,
     Config,
     ConfigError,
-    SUPPORTED_PROVIDERS,
     load_config,
 )
 
