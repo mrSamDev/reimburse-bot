@@ -80,6 +80,58 @@ async def test_get_returns_detached_copy(tmp_path):
     assert b.receipt_file_ids == []
 
 
+# ---- Atomic list mutations (cross-process lost-update fix) -------------
+
+async def test_add_file_id_atomic_creates_row(tmp_path):
+    store = _store(tmp_path)
+    assert await store.add_file_id(1, "f1") is True
+    assert (await store.get(1)).receipt_file_ids == ["f1"]
+
+
+async def test_add_file_id_dedupe_returns_false(tmp_path):
+    store = _store(tmp_path)
+    assert await store.add_file_id(1, "f1") is True
+    assert await store.add_file_id(1, "f1") is False
+    assert (await store.get(1)).receipt_file_ids == ["f1"]
+
+
+async def test_add_file_id_cross_instance_both_persist(tmp_path):
+    """Two instances appending different file ids to the same user must both
+    persist (the historical get->mutate->upsert lost one of them)."""
+    a = _store(tmp_path)
+    b = _store(tmp_path)
+    assert await a.add_file_id(1, "f1") is True
+    assert await b.add_file_id(1, "f2") is True
+    assert (await a.get(1)).receipt_file_ids == ["f1", "f2"]
+
+
+async def test_save_does_not_clobber_concurrent_append(tmp_path):
+    """Regression: a full-snapshot save() must not overwrite receipt_file_ids
+    that another instance appended after this snapshot was read."""
+    a = _store(tmp_path)
+    b = _store(tmp_path)
+    await a.add_file_id(1, "f1")
+    stale = await b.get(1)          # snapshot that only knows about f1
+    await a.add_file_id(1, "f2")    # concurrent append by another instance
+    stale.chat_id = 999
+    await b.save(stale)             # scalar-only save must NOT clobber f2
+    loaded = await a.get(1)
+    assert loaded.receipt_file_ids == ["f1", "f2"]
+    assert loaded.chat_id == 999    # scalar field still persisted
+
+
+async def test_clear_receipts_atomic_resets_and_title(tmp_path):
+    store = _store(tmp_path)
+    await store.add_file_id(1, "f1")
+    s = await store.get(1)
+    s.report_title = "My Expenses"
+    await store.save(s)
+    await store.clear_receipts(1)
+    loaded = await store.get(1)
+    assert loaded.receipt_file_ids == []
+    assert loaded.report_title == ""
+
+
 async def test_isolation_between_users(tmp_path):
     store = _store(tmp_path)
     s1 = await store.get(10)

@@ -99,6 +99,9 @@ class ReimbursementBot:
         session = await self.sessions.get(user.id)
         state, reply = handle_clear(session)  # clears receipts on the detached copy
         session.state = state
+        session.report_title = ""
+        # Atomic cross-process clear of the staged list + title.
+        await self.sessions.clear_receipts(user.id)
         await self.sessions.save(session)
         await self._reply(update, reply)
 
@@ -173,7 +176,15 @@ class ReimbursementBot:
         if state is not None:
             session.state = state
         if should_add:
-            session.add_file_id(file_id)
+            # Atomic cross-process append (never a get->mutate->upsert, which can
+            # lose a concurrent append). Returns False only if another instance
+            # already staged the same file_id meanwhile.
+            if not await self.sessions.add_file_id(user.id, file_id):
+                session.state = BotState.COLLECTING
+                await self.sessions.save(session)
+                await self._reply(update, msg.DUPLICATE_RECEIPT)
+                return
+            session.receipt_file_ids = session.receipt_file_ids + [file_id]
         await self.sessions.save(session)
         if reply:
             await self._reply(update, reply)
@@ -293,7 +304,12 @@ class ReimbursementBot:
                 pass
             self.locks.release(session.user_id)
             await self.sessions.release_processing(session.user_id)
-            session.clear_receipts()
+            # Atomic cross-process clear (not a save(), which no longer touches
+            # the receipt list and could clobber a concurrent append).
+            session.state = BotState.IDLE
+            session.report_title = ""
+            session.receipt_file_ids = []
+            await self.sessions.clear_receipts(session.user_id)
             await self.sessions.save(session)
 
     async def _renew_lease_loop(self, user_id: int) -> None:

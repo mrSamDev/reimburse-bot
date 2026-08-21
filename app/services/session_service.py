@@ -129,12 +129,15 @@ class SessionStore:
     def _upsert(self, session: Session) -> None:
         conn = self._connect()
         try:
+            # ``receipt_file_ids`` is intentionally NOT updated here: the list is
+            # mutated only via the atomic ``add_file_id``/``clear_receipts`` methods
+            # so a full-snapshot save() never clobbers a concurrent append from
+            # another instance (cross-process lost-update fix).
             conn.execute(
                 f"INSERT INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)}) "
                 "ON CONFLICT(user_id) DO UPDATE SET "
                 "chat_id=excluded.chat_id, state=excluded.state, "
-                "receipt_file_ids=excluded.receipt_file_ids, "
                 "report_title=excluded.report_title, "
                 "updated_at=excluded.updated_at",
                 self._session_to_row(session),
@@ -177,22 +180,51 @@ class SessionStore:
     async def set_state(self, user_id: int, state: BotState) -> Session:
         return await asyncio.to_thread(self._op_set_state, user_id, state)
 
-    def _op_add_file_id(self, user_id: int, file_id: str) -> Session:
-        session = self._op_get(user_id)
-        session.add_file_id(file_id)
-        self._upsert(session)
-        return session
+    def _op_add_file_id(self, user_id: int, file_id: str) -> bool:
+        """Append ``file_id`` atomically if not already present.
 
-    async def add_file_id(self, user_id: int, file_id: str) -> Session:
+        Cross-process safe: a single UPDATE with a ``json_insert`` append and a
+        dedupe sub-query, so concurrent appends from separate instances never
+        lose each other (the historical get->mutate->upsert dropped one).
+        Returns True if appended, False if it was already present.
+        """
+        now = _utc_now()
+        conn = self._connect()
+        try:
+            conn.execute(
+                f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
+                (user_id, user_id, BotState.IDLE.value, json.dumps([]), "", now, now),
+            )
+            cur = conn.execute(
+                "UPDATE sessions SET receipt_file_ids = "
+                "json_insert(receipt_file_ids, '$[#]', ?), updated_at = ? "
+                "WHERE user_id = ? AND json_valid(receipt_file_ids) AND "
+                "NOT EXISTS (SELECT 1 FROM json_each(receipt_file_ids) WHERE value = ?)",
+                (file_id, now, user_id, file_id),
+            )
+            conn.commit()
+            return cur.rowcount == 1
+        finally:
+            conn.close()
+
+    async def add_file_id(self, user_id: int, file_id: str) -> bool:
         return await asyncio.to_thread(self._op_add_file_id, user_id, file_id)
 
-    def _op_clear_receipts(self, user_id: int) -> Session:
-        session = self._op_get(user_id)
-        session.clear_receipts()
-        self._upsert(session)
-        return session
+    def _op_clear_receipts(self, user_id: int) -> None:
+        """Atomically clear a user's staged receipts and report title."""
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE sessions SET receipt_file_ids = '[]', report_title = '', "
+                "updated_at = ? WHERE user_id = ?",
+                (_utc_now(), user_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
-    async def clear_receipts(self, user_id: int) -> Session:
+    async def clear_receipts(self, user_id: int) -> None:
         return await asyncio.to_thread(self._op_clear_receipts, user_id)
 
     def _op_clear(self, user_id: int) -> None:
