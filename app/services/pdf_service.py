@@ -193,6 +193,17 @@ def generate_report(
     image_map = image_map or {}
     st = _build_styles()
 
+    # Metadata title combines the flow title with the grand total(s) so it's
+    # discoverable in the file's document info without opening the PDF.
+    if len(batch.currencies()) == 1:
+        cur = batch.currencies()[0]
+        doc_title = f"{title} — Total: {cur} {_money(batch.currency_totals[cur])}"
+    else:
+        parts = [
+            f"{cur} {_money(batch.currency_totals[cur])}"
+            for cur in batch.currencies()
+        ]
+        doc_title = f"{title} — Total: {'; '.join(parts)}"
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=A4,
@@ -200,7 +211,7 @@ def generate_report(
         rightMargin=20 * mm,
         topMargin=18 * mm,
         bottomMargin=18 * mm,
-        title=title,
+        title=doc_title,
         author="Reimbursement Report Generator",
     )
 
