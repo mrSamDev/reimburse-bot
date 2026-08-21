@@ -1,0 +1,11 @@
+{
+  "merchant_name": "Ride with Sazzad",
+  "transaction_date": "Tue, Jun 23, 2026",
+  "currency": "AED",
+  "subtotal": 50.00,
+  "tax": 3.50,
+  "discount": null,
+  "total": 53.50,
+  "confidence": 0.98,
+  "notes": ""
+}

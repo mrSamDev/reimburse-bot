@@ -1,0 +1,27 @@
+# Secrets — never commit.
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary processing files
+temp/*
+!temp/.gitkeep
+
+# Local OS noise
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.pdf
+!reference_report.pdf

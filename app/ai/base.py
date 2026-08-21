@@ -1,0 +1,67 @@
+"""Vision AI provider abstraction."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.models.receipt import _to_decimal
+
+
+class ReceiptExtraction(BaseModel):
+    """Raw structured output expected from a vision provider.
+
+    Mirrors what the AI is asked to return. Values are still untrusted until
+    validated; this model performs only shape/type validation.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
+
+    merchant_name: Optional[str] = None
+    transaction_date: Optional[str] = None
+    currency: Optional[str] = None
+    subtotal: Optional[Decimal] = None
+    tax: Optional[Decimal] = None
+    discount: Optional[Decimal] = None
+    total: Optional[Decimal] = None
+    confidence: float = 0.0
+    notes: str = ""
+
+    @field_validator("subtotal", "tax", "discount", "total", mode="before")
+    @classmethod
+    def _money(cls, v: Any) -> Decimal | None:
+        if v is None or v == "":
+            return None
+        try:
+            return Decimal(str(v))
+        except Exception as exc:
+            raise ValueError(f"invalid monetary value {v!r}") from exc
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _conf(cls, v: Any) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
+
+
+class AIProviderError(Exception):
+    """Raised when a vision provider fails (timeout, transport, parse)."""
+
+
+class ReceiptVisionProvider(ABC):
+    """Interface every vision provider must implement.
+
+    ``extract_receipt`` receives the path to a normalized image and returns a
+    :class:`ReceiptExtraction`. Business logic never depends on a concrete
+    provider.
+    """
+
+    @abstractmethod
+    def extract_receipt(self, image_path: str | Path) -> ReceiptExtraction:
+        """Extract structured receipt data from ``image_path``."""

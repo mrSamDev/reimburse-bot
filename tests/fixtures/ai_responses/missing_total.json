@@ -1,0 +1,9 @@
+{
+  "merchant_name": "Ride with Janan",
+  "transaction_date": "Jun 24, 2026",
+  "currency": "AED",
+  "subtotal": 51.00,
+  "total": null,
+  "confidence": 0.95,
+  "notes": "cannot read final amount"
+}

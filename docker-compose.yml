@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    container_name: reimbursement-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TEMP_DIR=/tmp/reimbursement
+    # Temporary filesystem only — no persistence in V1. No secrets in the image;
+    # they are injected at runtime from .env.
+    tmpfs:
+      - /tmp/reimbursement:size=64m,mode=0770

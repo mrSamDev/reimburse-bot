@@ -1,0 +1,11 @@
+{
+  "merchant_name": "Blurry Receipt",
+  "transaction_date": null,
+  "currency": "AED",
+  "subtotal": null,
+  "tax": null,
+  "discount": null,
+  "total": 49.00,
+  "confidence": 0.3,
+  "notes": "blurry"
+}

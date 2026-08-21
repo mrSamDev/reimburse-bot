@@ -1,0 +1,9 @@
+python-telegram-bot==22.8
+pydantic==2.13.4
+reportlab==4.4.0
+Pillow==11.3.0
+python-dotenv==1.1.1
+openai==1.92.0
+pytest==8.4.1
+pytest-asyncio==1.0.0
+pypdf==6.16.1
