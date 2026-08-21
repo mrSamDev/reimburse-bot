@@ -10,6 +10,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from app.ai.ollama_provider import build_provider
 from app.bot.bot import ReimbursementBot
 from app.config import PROJECT_ROOT, Config, ConfigError, load_config
+from app.services.cleanup_service import sweep_orphaned_requests
 from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
@@ -63,6 +64,12 @@ def main() -> None:
         raise SystemExit(f"Configuration error: {exc}")
     except ValueError as exc:
         raise SystemExit(f"Configuration error: {exc}")
+
+    # A hard kill (SIGKILL/OOM) can leave orphaned request dirs behind from a
+    # previous run; sweep them before polling so the temp filesystem never fills.
+    swept = sweep_orphaned_requests(config.temp_dir)
+    if swept:
+        logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)
 
     application = build_application(config)
     application.run_polling(drop_pending_updates=True)

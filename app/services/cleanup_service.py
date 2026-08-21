@@ -22,3 +22,21 @@ def cleanup_request_dir(base: str | Path) -> None:
         shutil.rmtree(p)
     except Exception as exc:  # pragma: no cover - best effort
         logger.warning("cleanup of %s failed: %s", p, exc)
+
+
+def sweep_orphaned_requests(temp_root: str | Path) -> int:
+    """Remove leftover ``request_*`` directories from a crashed process.
+
+    Normal runs clean up in ``finally``; a hard kill (SIGKILL/OOM) leaves
+    orphans behind. Run once at startup so a previous crash never fills the
+    temp filesystem. Returns how many directories were removed.
+    """
+    root = Path(temp_root)
+    removed = 0
+    if not root.exists():
+        return 0
+    for entry in root.iterdir():
+        if entry.is_dir() and entry.name.startswith("request_"):
+            cleanup_request_dir(entry)
+            removed += 1
+    return removed

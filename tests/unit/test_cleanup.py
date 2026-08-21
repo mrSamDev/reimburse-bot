@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.services.cleanup_service import cleanup_request_dir
+from app.services.cleanup_service import cleanup_request_dir, sweep_orphaned_requests
 from app.services.receipt_service import (
     ProcessingError,
     make_request_base,
@@ -21,6 +21,29 @@ def test_cleanup_removes_tree(tmp_path):
 
 def test_cleanup_missing_is_noop(tmp_path):
     cleanup_request_dir(tmp_path / "request_missing")  # should not raise
+
+
+def test_sweep_removes_orphaned_request_dirs(tmp_path):
+    # Leftovers from a crashed process (SIGKILL/OOM) must be swept at startup.
+    base = make_request_base(tmp_path, "dead1")
+    (base / "input" / "a.img").write_bytes(b"x")
+    make_request_base(tmp_path, "dead2")
+    removed = sweep_orphaned_requests(tmp_path)
+    assert removed == 2
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_sweep_ignores_non_request_entries(tmp_path):
+    other = tmp_path / "keep_me.txt"
+    other.write_text("data")
+    make_request_base(tmp_path, "dead")
+    removed = sweep_orphaned_requests(tmp_path)
+    assert removed == 1
+    assert other.exists()
+
+
+def test_sweep_empty_root_returns_zero(tmp_path):
+    assert sweep_orphaned_requests(tmp_path) == 0
 
 
 def test_cleanup_removes_even_with_files_present(tmp_path):
