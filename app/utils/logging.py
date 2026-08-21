@@ -6,6 +6,7 @@ import contextvars
 import logging
 import re
 import sys
+import traceback
 from contextlib import contextmanager
 
 # The id of the in-flight receipt-processing request. When set, every log
@@ -57,6 +58,16 @@ class RedactingFilter(logging.Filter):
             try:
                 record.args = tuple(redact(str(a)) if isinstance(a, str) else a for a in record.args)
             except TypeError:
+                pass
+        if record.exc_info:
+            # Scrub the formatted traceback so a secret on the stack never leaks
+            # through the exception path (message alone is not sufficient).
+            try:
+                record.exc_text = redact(
+                    "".join(traceback.format_exception(*record.exc_info))
+                )
+                record.exc_info = None
+            except Exception:
                 pass
         return True
 

@@ -249,14 +249,16 @@ async def run_with_cleanup(
     file_ids: list[str],
     temp_root: str | Path,
     deliver=None,
+    request_id: str | None = None,
 ) -> ProcessingResult:
     """Run processing, deliver the report, then guarantee cleanup.
 
     ``deliver`` is an optional async callback ``deliver(result)`` invoked while
     the PDF still exists, so the bot can send it to Telegram before the request
-    directory is removed.
+    directory is removed. ``request_id`` lets a caller correlate logs emitted
+    across the whole generation (including its own error handling) to one id.
     """
-    request_id = uuid.uuid4().hex[:6]
+    request_id = request_id or uuid.uuid4().hex[:6]
     base = make_request_base(temp_root, request_id)
     try:
         result = await service.process(user_id, file_ids, request_base=base)

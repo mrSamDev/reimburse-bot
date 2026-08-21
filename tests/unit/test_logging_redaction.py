@@ -56,3 +56,34 @@ def test_configure_logging_adds_filter():
         for h in root.handlers
         for f in h.filters
     )
+
+
+def test_redaction_scrubs_exception_traceback():
+    import logging as _l
+
+    class _Handler(_l.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(self.format(record))
+
+    h = _Handler()
+    h.setFormatter(_l.Formatter("%(message)s"))
+    h.addFilter(RedactingFilter())
+    logger = _l.getLogger("test.redact_exc")
+    logger.addHandler(h)
+    logger.propagate = False
+
+    secret = "sk-excsecretkey1234567890"
+    try:
+        raise ValueError(f"auth failed with key {secret}")
+    except ValueError:
+        logger.exception("request failed")
+
+    joined = "\n".join(h.messages)
+    # The secret must be gone from BOTH the message and the formatted traceback.
+    assert secret not in joined
+    assert "ValueError" in joined  # traceback still rendered
+

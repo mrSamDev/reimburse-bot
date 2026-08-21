@@ -1,5 +1,6 @@
 """End-to-end bot flow test using fakes (no real Telegram)."""
 
+import logging
 from pathlib import Path
 
 from PIL import Image
@@ -12,6 +13,7 @@ from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
 from app.services.telegram_service import TelegramService
+from app.utils.logging import RequestIdFormatter
 
 
 def make_valid_image(path):
@@ -197,3 +199,50 @@ async def test_duplicate_receipt_not_staged(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f1"), None)
     assert sessions.get(111).receipt_file_ids == ["f1"]
+
+
+async def test_catch_all_error_log_carries_request_id(tmp_path):
+    class _FailingSend(FakeTransport):
+        async def send_document(self, chat_id, document=None, caption="", timeout=None):
+            raise RuntimeError("telegram send exploded")
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.setFormatter(RequestIdFormatter("%(message)s"))
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append(self.format(record))
+
+    import re as _re
+
+    config = Config(
+        telegram_token="t", allowed_user_ids="111", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = _FailingSend()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore()
+    provider = FakeProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+
+    handler = _Capture()
+    handler.setLevel(logging.DEBUG)
+    bot_logger = logging.getLogger("app.bot.bot")
+    bot_logger.setLevel(logging.DEBUG)
+    bot_logger.addHandler(handler)
+    try:
+        await bot.start_command(_text_update("/start"), None)
+        await bot.message_handler(_photo_update("f1"), None)
+        await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+        await bot.message_handler(_text_update("secret"), None)
+
+        catch_all = [ln for ln in handler.lines if "unhandled processing error" in ln]
+        assert catch_all, "expected the bot catch-all to log"
+        assert _re.search(r"\[request_id=[0-9a-f]{6}\]", catch_all[0]), catch_all[0]
+    finally:
+        bot_logger.removeHandler(handler)

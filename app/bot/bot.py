@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from app.ai.base import ReceiptVisionProvider
 from app.bot import messages as msg
@@ -28,7 +29,7 @@ from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
 from app.services.telegram_service import TelegramService
 from app.utils import files as file_utils
-from app.utils.logging import configure_logging
+from app.utils.logging import configure_logging, request_scope
 
 logger = logging.getLogger(__name__)
 
@@ -197,35 +198,41 @@ class ReimbursementBot:
             session.state = BotState.IDLE
             return
         session.processing = True
-        request_id = None
-        try:
-            async def deliver(result):
-                nonlocal request_id
-                request_id = result.request_id
-                caption = self._report_caption(result)
-                await self.telegram.send_document(
-                    session.chat_id, result.out_pdf_path, caption=caption
-                )
+        # One id for the whole generation so every log line — including the
+        # catch-all below — is attributable to the same request.
+        request_id = uuid.uuid4().hex[:6]
+        with request_scope(request_id):
+            try:
+                async def deliver(result):
+                    caption = self._report_caption(result)
+                    await self.telegram.send_document(
+                        session.chat_id, result.out_pdf_path, caption=caption
+                    )
 
-            await run_with_cleanup(
-                self.processing,
-                session.user_id,
-                list(session.receipt_file_ids),
-                self.config.temp_dir,
-                deliver=deliver,
-            )
-            session.state = BotState.IDLE
-        except ProcessingError:
-            await self._reply(update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown"))
-            session.state = BotState.IDLE
-        except Exception:
-            logger.exception("unhandled processing error")
-            await self._reply(update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown"))
-            session.state = BotState.IDLE
-        finally:
-            self.locks.release(session.user_id)
-            session.processing = False
-            session.clear_receipts()
+                await run_with_cleanup(
+                    self.processing,
+                    session.user_id,
+                    list(session.receipt_file_ids),
+                    self.config.temp_dir,
+                    deliver=deliver,
+                    request_id=request_id,
+                )
+                session.state = BotState.IDLE
+            except ProcessingError:
+                await self._reply(
+                    update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
+                )
+                session.state = BotState.IDLE
+            except Exception:
+                logger.exception("unhandled processing error")
+                await self._reply(
+                    update, msg.ERROR_MESSAGE.format(request_id=request_id or "unknown")
+                )
+                session.state = BotState.IDLE
+            finally:
+                self.locks.release(session.user_id)
+                session.processing = False
+                session.clear_receipts()
 
     def _candidate_text(self, update) -> str:
         m = update.message
