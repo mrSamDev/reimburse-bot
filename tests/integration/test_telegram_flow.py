@@ -401,3 +401,79 @@ async def test_lease_renewed_during_long_generation(tmp_path):
     assert len(transport.sent_docs) == 1
     # After completion the lease is released and re-acquirable.
     assert await rival.try_acquire_processing(111) is True
+
+
+async def test_delivery_failure_keeps_staged_receipts_for_retry(tmp_path):
+    """A transient send failure must not drop the user's staged receipts; they
+    should be able to retry /generate without re-uploading (and receipts are only
+    cleared once delivery is confirmed)."""
+    class _FlakySend(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.fail_first = True
+
+        async def send_document(self, chat_id, document=None, caption="", timeout=None,
+                                read_timeout=None, write_timeout=None):
+            if self.fail_first:
+                self.fail_first = False
+                raise RuntimeError("transient send failure")
+            self.sent_docs.append(caption)
+
+    config = Config(
+        telegram_token="t", allowed_user_ids="111", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_request_delay_seconds=0, ai_concurrency=1,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = _FlakySend()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
+    provider = FakeProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    await bot.message_handler(_text_update("secret"), None)
+
+    # First delivery fails: an error is surfaced but receipts stay staged.
+    assert transport.sent_docs == []
+    session = await sessions.get(111)
+    assert session.receipt_file_ids == ["f1"], "staged receipts must survive a send failure"
+    assert session.state in (BotState.IDLE, BotState.COLLECTING)
+
+    # Retry without re-uploading: this time delivery succeeds and clears.
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    await bot.message_handler(_text_update("secret"), None)
+    assert len(transport.sent_docs) == 1
+    session = await sessions.get(111)
+    assert session.receipt_file_ids == []
+    assert session.state == BotState.IDLE
+
+
+async def test_photo_during_awaiting_password_not_deleted(tmp_path):
+    """A non-text message (e.g. a photo) while awaiting the password must not be
+    treated as a wrong-password attempt, must not be deleted, and must not cancel
+    the flow (regression: it previously deleted the photo and reset to IDLE)."""
+    bot, transport, sessions = _build(tmp_path)
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
+
+    photo_msg = FakeMessage(photo=[FakePhoto("p2")], message_id=77)
+    await bot.message_handler(FakeUpdate(photo_msg), None)
+
+    assert 77 not in transport.deleted, "photo during password flow must not be deleted"
+    assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
+    # The user is re-prompted for the password (text expected).
+    assert photo_msg.replies and "password" in photo_msg.replies[-1].lower()
+
+    # The correct password still proceeds and delivers.
+    await bot.message_handler(_text_update("secret"), None)
+    assert len(transport.sent_docs) == 1

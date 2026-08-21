@@ -219,6 +219,11 @@ class ReimbursementBot:
 
     async def _password_attempt(self, update, session) -> None:
         candidate = self._candidate_text(update)
+        # A non-text message (photo/document) while awaiting the password must
+        # not be consumed as a password attempt, deleted, or cancel the flow.
+        if candidate == "":
+            await self._reply(update, msg.PASSWORD_PROMPT)
+            return
         new_state, reply, correct = handle_password(session, candidate, security=self.security)
         # Best-effort delete the password message to avoid it lingering in chat.
         if update.effective_message:
@@ -260,16 +265,19 @@ class ReimbursementBot:
         heartbeat = asyncio.get_running_loop().create_task(
             self._renew_lease_loop(session.user_id)
         )
+        delivered = False
         try:
             with request_scope(request_id):
                 try:
                     async def deliver(result):
+                        nonlocal delivered
                         caption = self._report_caption(result)
                         await self.telegram.send_document(
                             session.chat_id, result.out_pdf_path, caption=caption
                         )
                         await self.processing.mark_delivered(request_id)
                         metrics.inc("delivered")
+                        delivered = True
 
                     async def on_progress(done, total):
                         await self._reply(update, msg.PROCESSING_PROGRESS.format(done=done, total=total))
@@ -304,12 +312,15 @@ class ReimbursementBot:
                 pass
             self.locks.release(session.user_id)
             await self.sessions.release_processing(session.user_id)
-            # Atomic cross-process clear (not a save(), which no longer touches
-            # the receipt list and could clobber a concurrent append).
             session.state = BotState.IDLE
-            session.report_title = ""
-            session.receipt_file_ids = []
-            await self.sessions.clear_receipts(session.user_id)
+            if delivered:
+                # Delivery confirmed: clear the staged receipts (atomic). If the
+                # report could not be delivered (e.g. a transient Telegram send
+                # failure), keep the receipts staged so the user can retry
+                # /generate without re-uploading and re-staging everything.
+                session.report_title = ""
+                session.receipt_file_ids = []
+                await self.sessions.clear_receipts(session.user_id)
             await self.sessions.save(session)
 
     async def _renew_lease_loop(self, user_id: int) -> None:
