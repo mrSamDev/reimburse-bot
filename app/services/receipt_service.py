@@ -335,12 +335,19 @@ class ProcessingService:
 
                 _check_deadline()
                 out_pdf = output_dir / _pdf_filename(request_id)
+                period = derive_report_period(batch.receipts)
+                if not period:
+                    logger.warning(
+                        "could not derive report period from receipt dates; "
+                        "omitting the report subtitle (request %s)",
+                        request_id,
+                    )
                 await asyncio.to_thread(
                     generate_report,
                     batch,
                     out_pdf,
                     title=title or self._config.report_title,
-                    period=derive_report_period(batch.receipts),
+                    period=period,
                     image_map=image_map,
                 )
             except ProcessingError:

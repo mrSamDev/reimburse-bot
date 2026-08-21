@@ -484,3 +484,19 @@ async def test_metrics_record_durations_and_error_classes(tmp_path):
     assert m["receipt_processing_seconds_sum"] > 0
     assert m["batch_processing_seconds_count"] == 1
     assert m["batch_processing_seconds_sum"] > 0
+
+
+async def test_unparseable_dates_log_period_omission(tmp_path, caplog):
+    """When no receipt transaction date parses, the report period subtitle is
+    dropped; that must be surfaced as a warning, not silently vanish."""
+    cfg = _config(tmp_path)
+    provider = FakeProvider([
+        ReceiptExtraction(merchant_name="No date", total="10.00", transaction_date=None),
+        ReceiptExtraction(merchant_name="Garbage date", total="11.00", transaction_date="not a real date"),
+    ])
+    svc = ProcessingService(cfg, provider, FakeTelegram())
+    with caplog.at_level(logging.WARNING, logger="app.services.receipt_service"):
+        await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    assert any("report period" in r.message for r in caplog.records), (
+        "dropped period subtitle must be logged"
+    )
