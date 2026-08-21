@@ -260,6 +260,35 @@ async def test_sweep_does_not_reclaim_live_lease(tmp_path):
     assert await store.try_acquire_processing(1) is False  # still held
 
 
+async def test_store_write_does_not_block_event_loop(tmp_path):
+    # A store write that must wait on a held SQLite lock must NOT block the
+    # event loop (it should run in a worker thread).
+    import sqlite3
+    import time
+
+    store = _store(tmp_path)
+    await store.save(await store.get(1))  # ensure a row
+    blocker = sqlite3.connect(str(_db(tmp_path)))
+    blocker.execute("BEGIN IMMEDIATE")  # hold the write lock
+    done = asyncio.Event()
+
+    async def do_write():
+        s = await store.get(1)
+        s.chat_id = 2
+        await store.save(s)
+        done.set()
+
+    asyncio.create_task(do_write())
+    await asyncio.sleep(0.05)  # let the write reach the lock
+    t0 = time.monotonic()
+    await asyncio.sleep(0.05)  # the loop must tick on time
+    elapsed = time.monotonic() - t0
+    blocker.rollback()  # release the lock
+    blocker.close()
+    await asyncio.wait_for(done.wait(), timeout=3)
+    assert elapsed < 0.15  # far below busy_timeout; loop stayed responsive
+
+
 async def test_maintenance_loop_runs_sweep(tmp_path):
     from app.main import _maintenance_loop
 

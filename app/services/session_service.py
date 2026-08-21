@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -137,42 +138,58 @@ class SessionStore:
             conn.close()
 
     # ---- public API --------------------------------------------------------
-    async def get(self, user_id: int) -> Session:
+    # ---- public API (async wrappers over sync DB ops, off the event loop) ---
+    def _op_get(self, user_id: int) -> Session:
         session = self._load(user_id)
         if session is None:
             return Session(user_id=user_id, chat_id=user_id)
         return session
 
-    async def save(self, session: Session) -> None:
-        self._upsert(session)
+    async def get(self, user_id: int) -> Session:
+        return await asyncio.to_thread(self._op_get, user_id)
 
-    async def set_chat_id(self, user_id: int, chat_id: int) -> Session:
-        session = await self.get(user_id)
+    async def save(self, session: Session) -> None:
+        await asyncio.to_thread(self._upsert, session)
+
+    def _op_set_chat_id(self, user_id: int, chat_id: int) -> Session:
+        session = self._op_get(user_id)
         session.chat_id = chat_id
         session.touch()
         self._upsert(session)
         return session
 
-    async def set_state(self, user_id: int, state: BotState) -> Session:
-        session = await self.get(user_id)
+    async def set_chat_id(self, user_id: int, chat_id: int) -> Session:
+        return await asyncio.to_thread(self._op_set_chat_id, user_id, chat_id)
+
+    def _op_set_state(self, user_id: int, state: BotState) -> Session:
+        session = self._op_get(user_id)
         session.state = state
         session.touch()
         self._upsert(session)
         return session
 
-    async def add_file_id(self, user_id: int, file_id: str) -> Session:
-        session = await self.get(user_id)
+    async def set_state(self, user_id: int, state: BotState) -> Session:
+        return await asyncio.to_thread(self._op_set_state, user_id, state)
+
+    def _op_add_file_id(self, user_id: int, file_id: str) -> Session:
+        session = self._op_get(user_id)
         session.add_file_id(file_id)
         self._upsert(session)
         return session
 
-    async def clear_receipts(self, user_id: int) -> Session:
-        session = await self.get(user_id)
+    async def add_file_id(self, user_id: int, file_id: str) -> Session:
+        return await asyncio.to_thread(self._op_add_file_id, user_id, file_id)
+
+    def _op_clear_receipts(self, user_id: int) -> Session:
+        session = self._op_get(user_id)
         session.clear_receipts()
         self._upsert(session)
         return session
 
-    async def clear(self, user_id: int) -> None:
+    async def clear_receipts(self, user_id: int) -> Session:
+        return await asyncio.to_thread(self._op_clear_receipts, user_id)
+
+    def _op_clear(self, user_id: int) -> None:
         conn = self._connect()
         try:
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -180,8 +197,11 @@ class SessionStore:
         finally:
             conn.close()
 
-    async def purge_expired(self) -> int:
-        """Remove sessions idle past the TTL; also clears stale processing flags."""
+    async def clear(self, user_id: int) -> None:
+        await asyncio.to_thread(self._op_clear, user_id)
+
+    def _op_purge_expired(self) -> int:
+        """Remove sessions idle past the TTL (sync)."""
         now = datetime.now(timezone.utc)
         removed = 0
         conn = self._connect()
@@ -196,11 +216,11 @@ class SessionStore:
             conn.close()
         return removed
 
-    async def sweep(self) -> dict[str, int]:
-        """Reclaim abandoned leases and purge expired sessions in one maintenance pass.
+    async def purge_expired(self) -> int:
+        return await asyncio.to_thread(self._op_purge_expired)
 
-        Returns ``{"reclaimed": ..., "purged": ...}``.
-        """
+    def _op_sweep(self) -> dict[str, int]:
+        """Reclaim abandoned leases and purge expired sessions (sync)."""
         conn = self._connect()
         now_iso = _utc_now()
         try:
@@ -208,8 +228,11 @@ class SessionStore:
             conn.commit()
         finally:
             conn.close()
-        purged = await self.purge_expired()
+        purged = self._op_purge_expired()
         return {"reclaimed": reclaimed, "purged": purged}
+
+    async def sweep(self) -> dict[str, int]:
+        return await asyncio.to_thread(self._op_sweep)
 
     def _reclaim_expired_leases(
         self, conn: sqlite3.Connection, now_iso: str, user_id: int | None = None
@@ -230,23 +253,17 @@ class SessionStore:
             )
         return cur.rowcount
 
-    async def try_acquire_processing(self, user_id: int) -> bool:
-        """Atomically claim the per-user processing slot across processes.
-
-        An abandoned lease (crashed generation) is reclaimed when its ``lease_expiry``
-        has passed. Returns True iff this caller won the claim.
-        """
+    def _op_try_acquire_processing(self, user_id: int) -> bool:
+        """Atomically claim the per-user processing slot (sync)."""
         lease = _utc_now()
         expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
         conn = self._connect()
         try:
-            # Ensure a row exists (create absent) without overwriting live state.
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
                 (user_id, user_id, BotState.IDLE.value, json.dumps([]), lease, lease),
             )
-            # Reclaim an abandoned (already-expired) lease from a crashed generation.
             self._reclaim_expired_leases(conn, lease, user_id)
             cur = conn.execute(
                 "UPDATE sessions SET processing = 1, lease_expiry = ? "
@@ -258,7 +275,10 @@ class SessionStore:
         finally:
             conn.close()
 
-    async def release_processing(self, user_id: int) -> None:
+    async def try_acquire_processing(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._op_try_acquire_processing, user_id)
+
+    def _op_release_processing(self, user_id: int) -> None:
         conn = self._connect()
         try:
             conn.execute(
@@ -269,11 +289,10 @@ class SessionStore:
         finally:
             conn.close()
 
-    async def is_processing(self, user_id: int) -> bool:
-        """Return whether a generation is currently running for this user.
+    async def release_processing(self, user_id: int) -> None:
+        await asyncio.to_thread(self._op_release_processing, user_id)
 
-        The DB lease is the single source of truth for the in-flight flag.
-        """
+    def _op_is_processing(self, user_id: int) -> bool:
         conn = self._connect()
         try:
             row = conn.execute(
@@ -283,13 +302,20 @@ class SessionStore:
         finally:
             conn.close()
 
+    async def is_processing(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._op_is_processing, user_id)
+
     def backup(self, target_dir: str | Path) -> Path:
         """Write a durable copy of the sessions DB into ``target_dir``."""
         return backup_database(self._db_path, target_dir, label="sessions")
 
-    async def count(self) -> int:
+    def _op_count(self) -> int:
         conn = self._connect()
         try:
             return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         finally:
             conn.close()
+
+    async def count(self) -> int:
+        return await asyncio.to_thread(self._op_count)
+
