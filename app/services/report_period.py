@@ -39,10 +39,18 @@ def _parse_date(value: str | None) -> datetime | None:
     return None
 
 
-def derive_report_period(receipts: list[Receipt]) -> str:
-    """Return the most frequent month (ties -> latest) or "" if unparseable."""
+def derive_report_period(receipts: list[Receipt], *, min_confidence: float = 0.6) -> str:
+    """Return the most frequent month (ties -> latest) or "" if unparseable.
+
+    Only receipts whose extraction confidence is at or above ``min_confidence``
+    drive the subtitle. A low-confidence receipt is flagged for review anyway,
+    and letting an untrustworthy extraction label the financial report header is
+    worse than omitting the subtitle. Default matches the review-flag threshold.
+    """
     counts: dict[tuple[int, int], int] = {}
     for receipt in receipts:
+        if receipt.confidence < min_confidence:
+            continue
         dt = _parse_date(receipt.transaction_date)
         if dt is None:
             continue

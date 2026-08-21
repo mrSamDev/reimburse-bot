@@ -48,3 +48,29 @@ def test_mixed_numeric_formats_parse():
 def test_no_parseable_dates_returns_empty():
     assert derive_report_period([_r(None), _r("not a date")]) == ""
     assert derive_report_period([]) == ""
+
+
+def _r_conf(date, conf):
+    return Receipt(merchant_name="X", transaction_date=date, total=Decimal("1"), confidence=conf)
+
+
+def test_low_confidence_dates_do_not_drive_period():
+    """A low-confidence receipt's date must not label the report header (it is
+    flagged for review anyway and its extraction is untrustworthy)."""
+    receipts = [
+        _r_conf("2026-06-10", 0.9),  # June, confident
+        _r_conf("2026-07-05", 0.2),  # July, low confidence -> must be ignored
+    ]
+    assert derive_report_period(receipts) == "June Expenses"
+
+
+def test_confidence_threshold_is_configurable():
+    # A lower threshold still uses the otherwise-ignored date.
+    receipts = [_r_conf("2026-07-05", 0.2)]
+    assert derive_report_period(receipts) == ""
+    assert derive_report_period(receipts, min_confidence=0.0) == "July Expenses"
+
+
+def test_all_low_confidence_dates_return_empty():
+    receipts = [_r_conf("2026-06-10", 0.1), _r_conf("2026-07-05", 0.3)]
+    assert derive_report_period(receipts) == ""
