@@ -13,8 +13,10 @@ generates a PDF reimbursement report via a vision AI provider.
   before use, and never passed raw to the PDF layer.
 - **Temporary, request-scoped storage.** Images, normalized images and the PDF
   live under `temp/request_<id>/` and are deleted in a `finally` block even on
-  failure.
-- **No permanent database or object storage** in V1.
+  failure (and orphans from a crash are swept at startup).
+- **Durable audit ledger.** Every accepted receipt is recorded in a local
+  SQLite database (`data/receipts.db`), deduplicated by Telegram `file_id`,
+  so accepted reimbursements have a persistent trail across restarts.
 
 ## Requirements
 
