@@ -1,9 +1,4 @@
-"""ReportLab reimbursement report generator.
-
-Layout mirrors the original ``Reimburse/pdf_report.py`` implementation: a
-compact 3-column table (Image | Receipt | Amount) with slim page margins
-(20mm sides, 18mm top/bottom) so far less page space is wasted on padding.
-"""
+"""ReportLab reimbursement report generator (compact 3-column layout)."""
 
 from __future__ import annotations
 
@@ -43,12 +38,7 @@ def _money(value: Decimal) -> str:
 
 
 def _receipt_text(receipt: Receipt) -> str:
-    """Build the safe, pre-escaped description text for a receipt row.
-
-    Merchant name, transaction date and (when flagged) a review warning. Every
-    user-provided field is XML-escaped before being joined with ``<br/>`` so the
-    ``Paragraph`` cell renders real line breaks and no markup from receipt data
-    is interpreted."""
+    """Merchant, date and (when flagged) a review warning, XML-escaped."""
     parts = [escape(receipt.merchant_name)]
     parts.append(escape(receipt.display_date()))
     if receipt.review_required:
@@ -58,8 +48,7 @@ def _receipt_text(receipt: Receipt) -> str:
 
 
 def _scaled_image(path: Path, target_width_pt: float) -> Image:
-    """Return a ReportLab ``Image`` flowable scaled to ``target_width_pt`` while
-    preserving the source aspect ratio."""
+    """ReportLab Image flowable scaled to ``target_width_pt``, aspect preserved."""
     reader = ImageReader(str(path))
     iw, ih = reader.getSize()
     width = target_width_pt
@@ -110,10 +99,7 @@ def _build_table(
     image_width_pt: float,
     styles: dict,
 ) -> Table:
-    """Build the 3-column (Image | Receipt | Amount) table for ``rows``.
-
-    ``rows`` items are ``(receipt_text, amount_display, image_path_or_None)``.
-    """
+    """Build the 3-column (Image | Receipt | Amount) table."""
     table_data = [[
         Paragraph("", styles["header_left"]),
         Paragraph("Receipt", styles["header_left"]),
@@ -165,10 +151,7 @@ def generate_report(
 ) -> Path:
     """Generate a reimbursement PDF and return its path.
 
-    ``image_map`` maps ``source_file_id`` -> normalized image path so the
-    original receipt image is embedded. Receipts without an image render as
-    text-only rows. Margins and the 3-column layout match the original
-    ``Reimburse/pdf_report.py`` implementation.
+    ``image_map`` maps ``source_file_id`` -> image path for embedding.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

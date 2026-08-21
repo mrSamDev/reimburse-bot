@@ -62,7 +62,9 @@ python -m app.main         # start long polling
 | `BACKUP_RETENTION` | Max backup copies kept per database; older ones pruned at startup (default 10) |
 | `HEALTH_ENABLED` | Serve `/health` + `/metrics` on `HEALTH_PORT` (default `false`) |
 | `HEALTH_PORT` | HTTP port for the health/metrics server (default 8080) |
-| `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
+| `REPORT_TITLE` | Report header title (default `Heading Travel Expenses`) |
+
+> The report **period** subtitle (e.g. "July Expenses") is derived automatically from the receipts' transaction dates (dominant month across the batch), not configured via env.
 
 ## Commands
 

@@ -45,12 +45,9 @@ def _utc_now() -> str:
 class SessionStore:
     """Durable, per-user session registry backed by SQLite (WAL).
 
-    Persistence is repository-style: :meth:`get` returns a detached ``Session``
-    snapshot; callers mutate it and persist via :meth:`save` (an upsert). This is
-    correct across processes — no in-memory dict to diverge.
-
-    Generation is serialized per user with :meth:`try_acquire_processing`, an
-    atomic ``UPDATE ... WHERE processing = 0`` that is safe across instances.
+    Repository-style: :meth:`get` returns a detached ``Session`` snapshot that
+    callers mutate and persist via :meth:`save`. Generation is serialized per
+    user with :meth:`try_acquire_processing` (atomic, multi-instance safe).
     """
 
     def __init__(
@@ -65,10 +62,8 @@ class SessionStore:
         self._lease_ttl = lease_ttl_seconds
         self._migrate()
 
-    # ---- connection / schema -------------------------------------------
     def _connect(self) -> sqlite3.Connection:
-        # Explicit busy timeout (10s): a write must wait for the lock rather than
-        # fail with "database is locked" under concurrent instances.
+        # Busy timeout: wait for the lock instead of failing under concurrency.
         conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA journal_mode=WAL")
@@ -88,7 +83,6 @@ class SessionStore:
         finally:
             conn.close()
 
-    # ---- row <-> Session --------------------------------------------------
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         return Session(
             user_id=row["user_id"],
@@ -129,10 +123,8 @@ class SessionStore:
     def _upsert(self, session: Session) -> None:
         conn = self._connect()
         try:
-            # ``receipt_file_ids`` is intentionally NOT updated here: the list is
-            # mutated only via the atomic ``add_file_id``/``clear_receipts`` methods
-            # so a full-snapshot save() never clobbers a concurrent append from
-            # another instance (cross-process lost-update fix).
+            # ``receipt_file_ids`` mutated only via atomic add/clear so save()
+            # never clobbers a concurrent append (cross-process lost-update fix).
             conn.execute(
                 f"INSERT INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)}) "
@@ -146,8 +138,6 @@ class SessionStore:
         finally:
             conn.close()
 
-    # ---- public API --------------------------------------------------------
-    # ---- public API (async wrappers over sync DB ops, off the event loop) ---
     def _op_get(self, user_id: int) -> Session:
         session = self._load(user_id)
         if session is None:
@@ -181,13 +171,7 @@ class SessionStore:
         return await asyncio.to_thread(self._op_set_state, user_id, state)
 
     def _op_add_file_id(self, user_id: int, file_id: str) -> bool:
-        """Append ``file_id`` atomically if not already present.
-
-        Cross-process safe: a single UPDATE with a ``json_insert`` append and a
-        dedupe sub-query, so concurrent appends from separate instances never
-        lose each other (the historical get->mutate->upsert dropped one).
-        Returns True if appended, False if it was already present.
-        """
+        """Append ``file_id`` atomically if not already present."""
         now = _utc_now()
         conn = self._connect()
         try:
@@ -331,16 +315,7 @@ class SessionStore:
         await asyncio.to_thread(self._op_release_processing, user_id)
 
     def _op_renew_processing_lease(self, user_id: int) -> bool:
-        """Refresh a live processing lease's expiry (heartbeat).
-
-        A generation that runs longer than ``lease_ttl_seconds`` would otherwise
-        look crashed and be reclaimed by another instance mid-run (double
-        extraction / double billing). Renewing the expiry as the work proceeds
-        keeps the slot held for exactly as long as the run needs, while still
-        releasing it promptly when the run ends or the process dies (the
-        heartbeat dies with it). Returns False when there is nothing to renew
-        (lease already released), so a heartbeat loop can stop cleanly.
-        """
+        """Renew a live lease's expiry (heartbeat) so a long run isn't reclaimed."""
         expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
         conn = self._connect()
         try:

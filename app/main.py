@@ -38,8 +38,6 @@ async def _maintenance_loop(
         try:
             result = await sweeper()
             if result.get("reclaimed") or result.get("purged"):
-                # result is a dict; use named mapping-style formatting so the
-                # dict is consumed as a mapping, not exploded as positional args.
                 logger.info(
                     "maintenance sweep: reclaimed=%(reclaimed)d purged=%(purged)d",
                     result,
@@ -136,8 +134,6 @@ def build_application(
     app.add_handler(CommandHandler("cancel", bot.cancel_command))
     app.add_handler(CommandHandler("generate", bot.generate_command))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.TEXT, bot.message_handler))
-    # Start the background maintenance loop (session sweep + idle-lock eviction)
-    # in ``post_init``, using the same sessions + bot locks this app owns.
     app.post_init = _make_post_init(
         sessions,
         config.maintenance_interval_seconds,
@@ -167,10 +163,7 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
-    # Resolve dirs to absolute paths and ensure they exist and are writable
-    # before polling. Failing here gives a clear message instead of an opaque
-    # PermissionError mid-request, and makes the app self-healing when an image
-    # does not pre-create the dirs (e.g. a root-owned /app/temp default).
+    # Resolve dirs to absolute paths, creating + verifying them writable up front.
     config.temp_dir = Path(config.temp_dir).resolve()
     config.data_dir = Path(config.data_dir).resolve()
     config.backup_dir = Path(config.backup_dir).resolve()
@@ -185,8 +178,7 @@ def main() -> None:
                 "Check the runtime user owns the mount (TEMP_DIR/DATA_DIR/BACKUP_DIR)."
             ) from exc
 
-    # A hard kill (SIGKILL/OOM) can leave orphaned request dirs behind from a
-    # previous run; sweep them before polling so the temp filesystem never fills.
+    # Sweep orphaned request dirs from a previous hard kill (SIGKILL/OOM).
     logger.info(
         "config: concurrency=%d request_delay=%.1fs retries=%d retry_delay=%.1fs "
         "max_edge=%d TPM-aware_retry=yes",
@@ -200,8 +192,7 @@ def main() -> None:
     if swept:
         logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)
 
-    # Durable session store; purge stale sessions (and any stale processing
-    # lease left by a crashed generation) before polling.
+    # Durable session store; purge stale sessions and abandoned leases first.
     sessions = SessionStore(
         db_path=config.data_dir / "sessions.db",
         ttl_seconds=config.session_ttl_seconds,
@@ -211,7 +202,7 @@ def main() -> None:
     if purged:
         logger.warning("purged %d expired sessions", purged)
 
-    # Durable backup of the audit + session DBs before we start serving.
+    # Durable backup of the audit + session DBs before serving.
     ledger = ReceiptLedger(config.data_dir / "receipts.db")
     try:
         ledger.backup(config.backup_dir, retention=config.backup_retention)

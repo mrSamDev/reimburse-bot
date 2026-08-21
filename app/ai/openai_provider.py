@@ -27,8 +27,7 @@ class OpenAIProvider(ReceiptVisionProvider):
     def __init__(self, config: Config) -> None:
         from openai import OpenAI
 
-        # max_retries=0: the SDK's built-in auto-retry is disabled so we fully
-        # control pacing/backoff (see _extract_with_retry in receipt_service).
+        # max_retries=0: disable SDK auto-retry; we control pacing/backoff.
         self._client = OpenAI(api_key=config.openai_api_key, max_retries=0)
         self._model = config.openai_model or "gpt-4o-mini"
         self._timeout = config.ai_timeout_seconds
@@ -62,10 +61,8 @@ class OpenAIProvider(ReceiptVisionProvider):
         except AIProviderError:
             raise
         except RateLimitError as exc:
-            # Surface the precise 429 reason so operators can distinguish a
-            # temporary rate limit (rate_limit_exceeded — pacing/retry helps)
-            # from a billing/quota block (insufficient_quota — retries never
-            # help; requires topping up or raising the tier).
+            # Distinguish a temporary rate limit (retry helps) from a billing/quota
+            # block (retries never help; needs topping up or a higher tier).
             err_type = getattr(exc, "type", None) or getattr(exc, "code", None)
             err_msg = getattr(exc, "message", None) or str(exc)
             logger.info("openai 429: type=%r code=%r msg=%s", err_type, getattr(exc, "code", None), err_msg)

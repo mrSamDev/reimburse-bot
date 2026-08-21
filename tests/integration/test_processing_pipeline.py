@@ -111,6 +111,33 @@ async def test_custom_title_lands_in_pdf(tmp_path):
     assert "July Expenses" in text
 
 
+async def test_report_period_derived_from_receipt_dates(tmp_path):
+    """The PDF period subtitle comes from the receipts' transaction dates, not
+    from config. Regression: period was read from REPORT_PERIOD env."""
+    from pypdf import PdfReader
+
+    cfg = _config(tmp_path)
+    text = ""
+
+    async def deliver(result):
+        nonlocal text
+        text = " ".join((p.extract_text() or "") for p in PdfReader(str(result.out_pdf_path)).pages)
+        text = " ".join(text.split())
+
+    # Most receipts dated in July -> "July Expenses" dominates despite the
+    # config still carrying the old default value.
+    svc = ProcessingService(
+        cfg,
+        FakeProvider([
+            _ext("A", "53.50", date="Jul 1, 2026"),
+            _ext("B", "51.00", date="2026-07-16"),
+        ]),
+        FakeTelegram(),
+    )
+    await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir, deliver=deliver)
+    assert "July Expenses" in text
+
+
 async def test_custom_title_falls_back_to_config(tmp_path):
     from pypdf import PdfReader
 

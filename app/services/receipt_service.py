@@ -25,6 +25,7 @@ from app.services import file_validation
 from app.services.cleanup_service import cleanup_request_dir
 from app.services.ledger_service import ReceiptLedger
 from app.services.pdf_service import generate_report
+from app.services.report_period import derive_report_period
 from app.services.telegram_service import TelegramService
 from app.utils import images, metrics
 from app.utils.logging import request_scope
@@ -119,24 +120,8 @@ async def _extract_with_retry(
 ) -> ReceiptExtraction:
     """Extract a receipt, retrying transient provider failures with backoff.
 
-    Only retries :class:`AIProviderError` (transport/parse failures that may be
-    transient). Validation errors are not retried because the AI already
-    returned data that failed hard checks. Backoff uses full jitter to avoid a
-    thundering herd on a recovering provider. Raises after ``max_attempts``.
-    ``_sleep``/``_random``/``_now`` are injectable for deterministic tests.
-
-    Rate-limit responses (HTTP 429) are retried with a longer backoff that
-    respects the server's ``Retry-After`` hint, capped at :data:`MAX_RATE_LIMIT_DELAY`.
-    Other :class:`AIProviderError` failures use full-jitter exponential backoff.
-
-    ``deadline`` (a monotonic-clock timestamp, as returned by
-    ``asyncio.get_running_loop().time()``) caps each backoff sleep to the time
-    actually remaining and stops scheduling retries once it is spent, so a long
-    rate-limit wait is never later killed by the enclosing per-receipt
-    ``wait_for`` (which would have made the spent sleep worthless).
-
-    ``budget`` (:class:`_CallBudget`) stops extraction as soon as the per-run
-    paid-call budget is exhausted, raising :class:`BudgetExceededError`.
+    Only ``AIProviderError`` (possibly transient) is retried; validation errors
+    aren't. ``_sleep``/``_random``/``_now`` are injectable for tests.
     """
     loop = asyncio.get_running_loop()
     now = _now or loop.time
@@ -165,9 +150,7 @@ async def _extract_with_retry(
                 raise
             kind = getattr(exc, "kind", None)
             if kind == "tokens":
-                # TPM window is 60s; the tiny Retry-After (e.g. 380ms) is
-                # useless because the whole minute's token budget is spent.
-                # Wait out the window instead.
+                # TPM window is 60s; the tiny Retry-After is useless, wait it out.
                 delay = MAX_RATE_LIMIT_DELAY
             else:
                 retry_after = getattr(exc, "retry_after", None)
@@ -189,8 +172,7 @@ class ProcessingService:
     """Downloads, validates, normalizes, extracts and reports receipts.
 
     A single failing receipt never destroys the batch; it increments
-    ``failed_count`` and processing continues. Cleanup is the caller's
-    responsibility (:func:`run_with_cleanup` guarantees it).
+    ``failed_count`` and processing continues.
     """
 
     def __init__(
@@ -280,10 +262,7 @@ class ProcessingService:
                         result = await self._process_one(
                             file_id, idx, input_dir, normalized_dir, call_budget
                         )
-                        # Pause before the next request so requests are spaced
-                        # ``ai_request_delay_seconds`` apart (1-by-1 when
-                        # concurrency=1). Holding the semaphore during the sleep
-                        # guarantees the gap is real, not absorbed by overlap.
+                        # Space requests; holding the semaphore during sleep makes the gap real.
                         if idx < len(file_ids) - 1:
                             delay = self._config.ai_request_delay_seconds
                             if delay > 0:
@@ -294,8 +273,7 @@ class ProcessingService:
                     *(_limited(file_id, idx) for idx, file_id in enumerate(file_ids))
                 )
                 if budget > 0:
-                    # Hard cap on the extraction phase: a batch that exceeds the
-                    # budget is aborted rather than allowed to drain.
+                    # Hard cap: abort an over-budget batch rather than drain it.
                     try:
                         outcomes = await asyncio.wait_for(gather, timeout=budget)
                     except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -326,7 +304,7 @@ class ProcessingService:
                     else:
                         receipt = outcome.receipt
                         if receipt is None:
-                            # Defensive: a successful outcome should carry a receipt.
+                            # A successful outcome should always carry a receipt.
                             failed += 1
                             metrics.inc("failed")
                         else:
@@ -338,8 +316,7 @@ class ProcessingService:
                                 normalized_dir / f"receipt_{idx:03d}.jpg"
                             )
                             if self._ledger is not None:
-                                # Audit the accepted receipt immediately (idempotent
-                                # by file_id) so a later PDF failure still leaves a trail.
+                                # Audit the accepted receipt now (idempotent by file_id).
                                 await asyncio.to_thread(
                                     self._ledger.insert,
                                     self._to_entry(receipt, request_id, user_id),
@@ -363,7 +340,7 @@ class ProcessingService:
                     batch,
                     out_pdf,
                     title=title or self._config.report_title,
-                    period=self._config.report_period,
+                    period=derive_report_period(batch.receipts),
                     image_map=image_map,
                 )
             except ProcessingError:
@@ -456,11 +433,8 @@ async def run_with_cleanup(
 ) -> ProcessingResult:
     """Run processing, deliver the report, then guarantee cleanup.
 
-    ``deliver`` is an optional async callback ``deliver(result)`` invoked while
-    the PDF still exists, so the bot can send it to Telegram before the request
-    directory is removed. ``request_id`` lets a caller correlate logs emitted
-    across the whole generation (including its own error handling) to one id.
-    ``on_progress`` is an optional ``(done, total)`` callback invoked per receipt.
+    ``deliver`` runs while the PDF still exists; ``request_id`` correlates
+    logs; ``on_progress`` is an optional ``(done, total)`` per-receipt callback.
     """
     request_id = request_id or uuid.uuid4().hex[:6]
     base = make_request_base(temp_root, request_id)

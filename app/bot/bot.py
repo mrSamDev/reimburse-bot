@@ -69,7 +69,6 @@ class ReimbursementBot:
             return None
         return user, chat
 
-    # ---- commands ---------------------------------------------------------
     async def start_command(self, update, context) -> None:
         auth = self._authorized(update)
         if auth is None:
@@ -104,8 +103,7 @@ class ReimbursementBot:
         state, reply = handle_clear(session)  # clears receipts on the detached copy
         session.state = state
         session.report_title = ""
-        # Atomic cross-process clear of the staged list + title.
-        await self.sessions.clear_receipts(user.id)
+        await self.sessions.clear_receipts(user.id)  # atomic cross-process clear
         await self.sessions.save(session)
         await self._reply(update, reply)
 
@@ -138,7 +136,6 @@ class ReimbursementBot:
         if reply:
             await self._reply(update, reply)
 
-    # ---- message handling ----------------------------------------------------
     async def message_handler(self, update, context) -> None:
         auth = self._authorized(update)
         if auth is None:
@@ -149,9 +146,7 @@ class ReimbursementBot:
         session.chat_id = chat.id
 
         if session.state == BotState.PROCESSING:
-            # A generation is in flight for this user. Reject any further input
-            # now so it is never misread as a password/heading attempt, and so
-            # no save() touches the row mid-generation.
+            # Generation in flight; reject input so it isn't misread as password/heading.
             await self._reply(update, msg.BUSY)
             return
 
@@ -180,9 +175,7 @@ class ReimbursementBot:
         if state is not None:
             session.state = state
         if should_add:
-            # Atomic cross-process append (never a get->mutate->upsert, which can
-            # lose a concurrent append). Returns False only if another instance
-            # already staged the same file_id meanwhile.
+            # Atomic cross-process append (avoids get->mutate->upsert lost append).
             if not await self.sessions.add_file_id(user.id, file_id):
                 session.state = BotState.COLLECTING
                 await self.sessions.save(session)
@@ -197,9 +190,8 @@ class ReimbursementBot:
         msg_obj = update.message
         if not msg_obj:
             return None, None, False
-        # Photo: use the largest available size.
         if msg_obj.photo:
-            photo = msg_obj.photo[-1]
+            photo = msg_obj.photo[-1]  # largest available size
             return photo.file_id, "image/jpeg", True
         if msg_obj.document:
             doc = msg_obj.document
@@ -209,7 +201,6 @@ class ReimbursementBot:
             return None, mime, False
         return None, None, False
 
-    # ---- heading, password & processing -----------------------------------
     async def _heading_attempt(self, update, session) -> None:
         candidate = self._candidate_text(update)
         new_state, reply, valid = handle_heading(session, candidate)
@@ -260,17 +251,11 @@ class ReimbursementBot:
             session.state = BotState.IDLE
             await self.sessions.save(session)
             return
-        # Persist PROCESSING before the long-running work so a concurrent message
-        # routes to the busy guard above rather than being read as a password or
-        # heading. save() no longer clobbers the processing lease.
+        # Persist PROCESSING first so concurrent messages hit the busy guard above.
         session.state = BotState.PROCESSING
         await self.sessions.save(session)
-        # One id for the whole generation so every log line — including the
-        # catch-all below — is attributable to the same request.
         request_id = uuid.uuid4().hex[:6]
-        # Keep the cross-process lease alive for the whole run (it can exceed the
-        # lease TTL, which would otherwise let a rival instance reclaim the slot
-        # and double-process / double-bill). Cancelled in ``finally``.
+        # Heartbeat keeps the lease alive past its TTL so a rival can't double-process.
         heartbeat = asyncio.get_running_loop().create_task(
             self._renew_lease_loop(session.user_id)
         )
@@ -323,25 +308,15 @@ class ReimbursementBot:
             await self.sessions.release_processing(session.user_id)
             session.state = BotState.IDLE
             if delivered:
-                # Delivery confirmed: clear the staged receipts (atomic). If the
-                # report could not be delivered (e.g. a transient Telegram send
-                # failure), keep the receipts staged so the user can retry
-                # /generate without re-uploading and re-staging everything.
+                # Clear staged receipts (atomic) only on confirmed delivery so a
+                # failed send can be retried with /generate without re-uploading.
                 session.report_title = ""
                 session.receipt_file_ids = []
                 await self.sessions.clear_receipts(session.user_id)
             await self.sessions.save(session)
 
     async def _renew_lease_loop(self, user_id: int) -> None:
-        """Heartbeat: refresh the cross-process processing lease during a long run.
-
-        A generation that runs longer than the lease TTL would otherwise look
-        crashed and be reclaimed by another instance mid-run (double extraction /
-        double billing). Renewing on a fraction of the lease TTL keeps the slot
-        held exactly as long as the work needs; the loop stops once the lease is
-        released (clean shutdown) and dies with the process on a crash, so a
-        dead run's lease still expires and becomes reclaimable.
-        """
+        """Heartbeat-renew the cross-process lease so a long run isn't reclaimed."""
         interval = self.config.session_lease_ttl_seconds / 3.0
         if interval <= 0:
             interval = 1.0
@@ -393,8 +368,7 @@ def _fmt(value) -> str:
     return f"{Decimal(value):,.2f}"
 
 
-# Telegram media captions are limited to 1024 characters. Captions that exceed
-# this (e.g. many failed-receipt reasons) are trimmed with a trailing ellipsis.
+# Telegram media captions max 1024 chars; longer ones get a trailing ellipsis.
 MAX_CAPTION_CHARS = 1024
 
 
