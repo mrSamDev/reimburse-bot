@@ -119,7 +119,7 @@ class ReimbursementBot:
         user, chat = auth
         session = await self.sessions.get(user.id)
         session.chat_id = chat.id
-        processing = session.processing or bool(self.locks.get(user.id).locked())
+        processing = await self.sessions.is_processing(user.id) or bool(self.locks.get(user.id).locked())
         state, reply = handle_generate(
             session, has_password=self.security.has_password, processing=processing
         )
@@ -154,7 +154,7 @@ class ReimbursementBot:
             file_id,
             has_id=file_id in session.receipt_file_ids,
             max_receipts=self.config.max_receipts,
-            processing=session.processing or bool(self.locks.get(user.id).locked()),
+            processing=await self.sessions.is_processing(user.id) or bool(self.locks.get(user.id).locked()),
             awaiting_password=False,
         )
         if state is not None:
@@ -248,7 +248,6 @@ class ReimbursementBot:
         finally:
             self.locks.release(session.user_id)
             await self.sessions.release_processing(session.user_id)
-            session.processing = False
             session.clear_receipts()
             await self.sessions.save(session)
 

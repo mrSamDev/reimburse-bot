@@ -21,7 +21,6 @@ def test_session_defaults():
     s = Session(user_id=1, chat_id=1)
     assert s.state == BotState.IDLE
     assert s.receipt_file_ids == []
-    assert not s.processing
 
 
 def test_add_file_id():
@@ -221,14 +220,28 @@ async def test_release_clears_processing_and_lease(tmp_path):
     assert await store.try_acquire_processing(1) is True
 
 
+async def test_is_processing_reflects_lease(tmp_path):
+    store = _store(tmp_path)
+    assert await store.is_processing(1) is False
+    await store.try_acquire_processing(1)
+    assert await store.is_processing(1) is True
+    await store.release_processing(1)
+    assert await store.is_processing(1) is False
+
+
 
 async def test_purge_expired_clears_stale_processing(tmp_path):
     store = _store(tmp_path, ttl_seconds=30)
     past = datetime.now(timezone.utc) - timedelta(seconds=31)
-    await store.save(Session(user_id=1, chat_id=1, processing=True, updated_at=past, created_at=past))
-    removed = await store.purge_expired()
-    assert removed == 1
-    # After a crash, a fresh instance can re-acquire the slot.
+    await store.save(Session(user_id=1, chat_id=1, updated_at=past, created_at=past))
+    # Simulate a crashed generation: mark the (expired) row as processing.
+    import sqlite3
+    conn = sqlite3.connect(str(_db(tmp_path)))
+    conn.execute("UPDATE sessions SET processing = 1 WHERE user_id = 1")
+    conn.commit()
+    conn.close()
+    assert await store.purge_expired() == 1
+    # After the stale row is purged, a fresh instance can re-acquire the slot.
     assert await store.try_acquire_processing(1) is True
 
 

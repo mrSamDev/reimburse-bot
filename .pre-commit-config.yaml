@@ -3,21 +3,33 @@ repos:
     hooks:
       - id: ruff
         name: ruff (lint)
-        entry: .venv/bin/ruff check app tests
-        language: system
+        entry: ruff check app tests
+        language: python
+        additional_dependencies: [ruff]
         types: [python]
         pass_filenames: false
 
       - id: mypy
         name: mypy (type-check app)
-        entry: .venv/bin/mypy app
-        language: system
+        entry: mypy app
+        language: python
+        additional_dependencies: [mypy]
         types: [python]
         pass_filenames: false
 
       - id: pytest
         name: pytest (full suite)
-        entry: .venv/bin/python -m pytest -q
-        language: system
+        entry: python -m pytest -q
+        language: python
+        additional_dependencies:
+          - pytest==8.4.1
+          - pytest-asyncio==1.0.0
+          - python-telegram-bot==22.8
+          - pydantic==2.13.4
+          - reportlab==4.4.0
+          - Pillow==12.3.0
+          - python-dotenv==1.2.3
+          - openai==1.92.0
+          - pypdf==6.16.1
         types: [python]
         pass_filenames: false

@@ -28,7 +28,6 @@ class Session(BaseModel):
     receipt_file_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
-    processing: bool = False
 
     def touch(self) -> None:
         self.updated_at = _now()

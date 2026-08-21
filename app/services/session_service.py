@@ -30,7 +30,7 @@ _MIGRATIONS: dict[int, str] = {
 }
 
 _COLUMNS = ("user_id", "chat_id", "state", "receipt_file_ids",
-            "processing", "created_at", "updated_at")
+            "created_at", "updated_at")
 
 
 def _utc_now() -> str:
@@ -90,7 +90,6 @@ class SessionStore:
             chat_id=row["chat_id"],
             state=BotState(row["state"]),
             receipt_file_ids=json.loads(row["receipt_file_ids"]),
-            processing=bool(row["processing"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -101,7 +100,6 @@ class SessionStore:
             session.chat_id,
             session.state.value,
             json.dumps(session.receipt_file_ids),
-            int(session.processing),
             session.created_at.isoformat(),
             session.updated_at.isoformat(),
         )
@@ -211,8 +209,7 @@ class SessionStore:
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
-                (user_id, user_id, BotState.IDLE.value, json.dumps([]),
-                 0, lease, lease),
+                (user_id, user_id, BotState.IDLE.value, json.dumps([]), lease, lease),
             )
             # Reclaim an abandoned (already-expired) lease from a crashed generation.
             conn.execute(
@@ -239,6 +236,20 @@ class SessionStore:
                 (user_id,),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    async def is_processing(self, user_id: int) -> bool:
+        """Return whether a generation is currently running for this user.
+
+        The DB lease is the single source of truth for the in-flight flag.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT processing FROM sessions WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return bool(row and row["processing"])
         finally:
             conn.close()
 
