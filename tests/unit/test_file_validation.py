@@ -8,7 +8,12 @@ from app.services.file_validation import (
     UnsupportedTypeError,
     validate_downloaded_image,
 )
-from app.utils.images import ImageNormalizationError, get_dimensions, normalize_image
+from app.utils.images import (
+    MAX_EDGE,
+    ImageNormalizationError,
+    get_dimensions,
+    normalize_image,
+)
 from tests.conftest import (
     make_corrupt,
     make_image,
@@ -78,7 +83,8 @@ class TestNormalization:
         src = make_large_image(tmp_path / "big.jpg", pixel=3000)
         out = normalize_image(src, tmp_path / "out.jpg")
         w, h = get_dimensions(out)
-        assert max(w, h) <= 1600
+        assert max(w, h) <= MAX_EDGE
+        assert max(w, h) <= 1024
 
     def test_corrupt_raises(self, tmp_path):
         src = make_corrupt(tmp_path / "bad.jpg")

@@ -39,6 +39,7 @@ class Config(BaseModel):
     ollama_model: str = "llava"
     max_receipts: int = 20
     max_file_size_mb: int = 10
+    image_max_edge: int = 1024
     temp_dir: Path = PROJECT_ROOT / "temp"
     data_dir: Path = PROJECT_ROOT / "data"
     backup_dir: Path = PROJECT_ROOT / "backups"
@@ -48,7 +49,7 @@ class Config(BaseModel):
     ai_request_delay_seconds: float = 1.0
     ai_concurrency: int = 1
     ai_per_receipt_timeout_seconds: int = 120
-    max_processing_seconds: float = 300.0
+    max_processing_seconds: float = 600.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
     session_lease_ttl_seconds: int = 120
@@ -90,6 +91,13 @@ class Config(BaseModel):
     def _check_positive_int(cls, v: int, info: Any) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be a positive integer")
+        return v
+
+    @field_validator("image_max_edge")
+    @classmethod
+    def _check_image_max_edge(cls, v: int) -> int:
+        if v < 256:
+            raise ValueError("image_max_edge must be >= 256")
         return v
 
     @field_validator("ai_retry_attempts")
@@ -222,6 +230,7 @@ def _from_env() -> dict[str, Any]:
         "ollama_model": get("OLLAMA_MODEL", "llava"),
         "max_receipts": int(get("MAX_RECEIPTS", "20")),
         "max_file_size_mb": int(get("MAX_FILE_SIZE_MB", "10")),
+        "image_max_edge": int(get("IMAGE_MAX_EDGE", "1024")),
         "temp_dir": Path(get("TEMP_DIR", str(PROJECT_ROOT / "temp"))),
         "data_dir": Path(get("DATA_DIR", str(PROJECT_ROOT / "data"))),
         "backup_dir": Path(get("BACKUP_DIR", str(PROJECT_ROOT / "backups"))),
@@ -231,7 +240,7 @@ def _from_env() -> dict[str, Any]:
         "ai_request_delay_seconds": float(get("AI_REQUEST_DELAY_SECONDS", "1.0")),
         "ai_concurrency": int(get("AI_CONCURRENCY", "1")),
         "ai_per_receipt_timeout_seconds": int(get("AI_PER_RECEIPT_TIMEOUT_SECONDS", "120")),
-        "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "300")),
+        "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "600")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
         "session_lease_ttl_seconds": int(get("SESSION_LEASE_TTL_SECONDS", "120")),

@@ -137,6 +137,15 @@ def main() -> None:
 
     # A hard kill (SIGKILL/OOM) can leave orphaned request dirs behind from a
     # previous run; sweep them before polling so the temp filesystem never fills.
+    logger.info(
+        "config: concurrency=%d request_delay=%.1fs retries=%d retry_delay=%.1fs "
+        "max_edge=%d TPM-aware_retry=yes",
+        config.ai_concurrency,
+        config.ai_request_delay_seconds,
+        config.ai_retry_attempts,
+        config.ai_retry_base_delay,
+        config.image_max_edge,
+    )
     swept = sweep_orphaned_requests(config.temp_dir)
     if swept:
         logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)

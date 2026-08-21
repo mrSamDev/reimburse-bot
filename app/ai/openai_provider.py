@@ -72,6 +72,7 @@ class OpenAIProvider(ReceiptVisionProvider):
             raise AIRateLimitError(
                 f"OpenAI rate limited [{err_type or 'unknown'}]: {err_msg}",
                 retry_after=_parse_retry_after(_retry_after_header(exc)),
+                kind=err_type,
             ) from exc
         except Exception as exc:
             raise AIProviderError(f"OpenAI request failed: {exc}") from exc

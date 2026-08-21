@@ -48,6 +48,8 @@ SESSION_CLEARED = "Session cleared."
 
 PROCESSING_STARTED = "Processing {n} receipts…"
 
+PROCESSING_PROGRESS = "Processing {done}/{total} receipts…"
+
 REPORT_READY = (
     "Your reimbursement report is ready.\n\n"
     "Receipts: {receipts}\n"

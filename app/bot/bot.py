@@ -241,6 +241,9 @@ class ReimbursementBot:
                         await self.processing.mark_delivered(request_id)
                         metrics.inc("delivered")
 
+                    async def on_progress(done, total):
+                        await self._reply(update, msg.PROCESSING_PROGRESS.format(done=done, total=total))
+
                     await run_with_cleanup(
                         self.processing,
                         session.user_id,
@@ -249,6 +252,7 @@ class ReimbursementBot:
                         deliver=deliver,
                         request_id=request_id,
                         title=session.report_title,
+                        on_progress=on_progress,
                     )
                     session.state = BotState.IDLE
                 except ProcessingError:

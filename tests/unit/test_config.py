@@ -36,6 +36,9 @@ def test_defaults():
     assert cfg.telegram_timeout_seconds == 30
     assert cfg.allowed_user_ids == []
     assert cfg.report_title == "Heading Travel Expenses"
+    assert cfg.ai_concurrency == 1
+    assert cfg.ai_request_delay_seconds == 1.0
+    assert cfg.image_max_edge == 1024
 
 
 def test_default_provider_openai_requires_key_at_runtime():

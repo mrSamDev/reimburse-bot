@@ -10,7 +10,10 @@ from PIL import Image, ImageOps
 logger = logging.getLogger(__name__)
 
 # Cap the longest edge so we don't send absurdly large images to the vision AI.
-MAX_EDGE = 1600
+# Kept modest (1024px) because gpt-4o vision token cost grows with image tiles:
+# 1600px ~12 tiles (~2125 tokens), 1024px ~4 tiles (~765 tokens) — ~3x cheaper
+# while still legible for receipt OCR, keeping us well under the TPM limit.
+MAX_EDGE = 1024
 OUTPUT_FORMAT = "JPEG"
 OUTPUT_QUALITY = 88
 

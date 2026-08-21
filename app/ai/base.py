@@ -56,12 +56,19 @@ class AIRateLimitError(AIProviderError):
     """Raised when the provider rate-limits the request (HTTP 429).
 
     ``retry_after`` carries the server's parsed ``Retry-After`` hint in seconds
-    (if available); retry logic uses it to pace re-attempts.
+    (if available). ``kind`` is the API's error type/code (e.g. ``"tokens"`` for
+    a tokens-per-minute limit) so retry logic can pick an appropriate wait.
     """
 
-    def __init__(self, message: str = "rate limited", retry_after: float | None = None):
+    def __init__(
+        self,
+        message: str = "rate limited",
+        retry_after: float | None = None,
+        kind: str | None = None,
+    ):
         super().__init__(message)
         self.retry_after = retry_after
+        self.kind = kind
 
 
 class ReceiptVisionProvider(ABC):

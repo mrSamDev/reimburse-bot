@@ -59,13 +59,14 @@ python -m app.main         # start long polling
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Ollama vision endpoint + model |
 | `MAX_RECEIPTS` | Max receipts per report (default 20) |
 | `MAX_FILE_SIZE_MB` | Max image size (default 10) |
+| `IMAGE_MAX_EDGE` | Longest image edge sent to the vision AI (px). Lower = fewer tokens = less 429 risk (default 1024) |
 | `TEMP_DIR` | Temporary processing root |
 | `DATA_DIR` | Persistent data root (holds the `receipts.db` audit ledger) |
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `AI_REQUEST_DELAY_SECONDS` | Pause between consecutive receipts; 0 disables (default 1.0) |
 | `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1 — one at a time) |
-| `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 300) |
+| `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 600) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |
 | `AI_PER_RECEIPT_TIMEOUT_SECONDS` | Hard per-receipt processing timeout (default 120) |

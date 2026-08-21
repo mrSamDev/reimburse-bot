@@ -106,8 +106,15 @@ async def _extract_with_retry(
             metrics.inc("ai_rate_limited")
             if attempt == max_attempts - 1:
                 raise
-            retry_after = getattr(exc, "retry_after", None)
-            delay = retry_after if retry_after is not None else base_delay * (2**attempt)
+            kind = getattr(exc, "kind", None)
+            if kind == "tokens":
+                # TPM window is 60s; the tiny Retry-After (e.g. 380ms) is
+                # useless because the whole minute's token budget is spent.
+                # Wait out the window instead.
+                delay = MAX_RATE_LIMIT_DELAY
+            else:
+                retry_after = getattr(exc, "retry_after", None)
+                delay = retry_after if retry_after is not None else base_delay * (2**attempt)
             delay = min(delay, MAX_RATE_LIMIT_DELAY)
             delay = delay * (1 + _rand())
             await _sleep(delay)
@@ -333,7 +340,12 @@ class ProcessingService:
                 file_validation.validate_downloaded_image(
                     raw_path, max_size_mb=self._config.max_file_size_mb
                 )
-                await asyncio.to_thread(images.normalize_image, raw_path, norm_path)
+                await asyncio.to_thread(
+                    images.normalize_image,
+                    raw_path,
+                    norm_path,
+                    max_edge=self._config.image_max_edge,
+                )
                 return await _extract_with_retry(
                     self._provider,
                     norm_path,

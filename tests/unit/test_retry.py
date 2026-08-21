@@ -146,3 +146,23 @@ def test_rate_limit_exhausts_attempts_and_raises():
         )
     assert provider.calls == 3
     assert len(sleeps) == 2
+
+
+def test_token_limit_waits_out_tpm_window():
+    # TPM 429: tiny Retry-After is useless; must wait out the ~60s window.
+    from app.services.receipt_service import MAX_RATE_LIMIT_DELAY
+
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+    provider = _FlakyProvider(
+        fail_for=2, exc=AIRateLimitError("tpm", retry_after=0.38, kind="tokens")
+    )
+    asyncio.run(
+        _extract_with_retry(
+            provider, "/img.jpg", max_attempts=3, base_delay=1.0,
+            _sleep=fake_sleep, _rand=lambda: 0.0,
+        )
+    )
+    # Both retries wait the full TPM window (capped), not the 380ms hint.
+    assert sleeps == [MAX_RATE_LIMIT_DELAY, MAX_RATE_LIMIT_DELAY]
