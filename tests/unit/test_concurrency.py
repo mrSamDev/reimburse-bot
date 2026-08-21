@@ -5,6 +5,57 @@ import asyncio
 from app.bot.locks import UserLockManager
 
 
+def _clock():
+    """Return a controllable monotonic clock (``now()`` reader + ``set``)."""
+    state = {"t": 0.0}
+    return lambda: state["t"], state
+
+
+def test_evict_idle_removes_unused_locks():
+    now, state = _clock()
+    m = UserLockManager(_now=now)
+    m.get(1)  # touched at t=0
+    state["t"] = 5
+    assert m.evict_idle(10) == 0  # recent -> kept
+    assert 1 in m._locks
+    state["t"] = 15
+    assert m.evict_idle(10) == 1  # 15-0 > 10 -> idle, evicted
+    assert 1 not in m._locks
+
+
+def test_held_lock_never_evicted():
+    now, state = _clock()
+    m = UserLockManager(_now=now)
+
+    async def acquire():
+        assert await m.acquire(1) is True
+
+    asyncio.run(acquire())
+    state["t"] = 999
+    assert m.evict_idle(10) == 0  # still held -> never evicted
+    assert 1 in m._locks
+
+
+def test_recently_used_lock_not_evicted():
+    now, state = _clock()
+    m = UserLockManager(_now=now)
+    m.get(1)  # touched at t=0
+    state["t"] = 5
+    assert m.evict_idle(10) == 0
+    assert 1 in m._locks
+
+
+def test_evict_cleans_both_maps():
+    now, state = _clock()
+    m = UserLockManager(_now=now)
+    m.get(1)
+    m.get(2)
+    state["t"] = 100
+    assert m.evict_idle(10) == 2
+    assert not m._locks
+    assert not m._last_used
+
+
 async def test_lock_acquire_release():
     m = UserLockManager()
     assert await m.acquire(1) is True

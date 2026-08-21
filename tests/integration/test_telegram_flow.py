@@ -1,6 +1,8 @@
 """End-to-end bot flow test using fakes (no real Telegram)."""
 
+import asyncio
 import logging
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -291,3 +293,57 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
         assert _re.search(r"\[request_id=[0-9a-f]{6}\]", catch_all[0]), catch_all[0]
     finally:
         bot_logger.removeHandler(handler)
+
+
+async def test_concurrent_message_during_generation_is_busy(tmp_path):
+    """Regression (Bug B): a message arriving mid-generation must be rejected as
+    busy — NOT misinterpreted as a password attempt, deleted, or reset to IDLE.
+
+    ``PROCESSING`` must be persisted before the long-running extraction starts so
+    that ``message_handler`` routes a concurrent message to the busy path.
+    """
+    class _SlowProvider(FakeProvider):
+        def extract_receipt(self, image_path):
+            time.sleep(0.4)  # hold generation open so a message can interleave
+            return super().extract_receipt(image_path)
+
+    config = Config(
+        telegram_token="t", allowed_user_ids="111", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_request_delay_seconds=0,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = FakeTransport()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
+    provider = _SlowProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+
+    # Correct password starts generation; it blocks inside a worker thread.
+    gen_task = asyncio.create_task(bot.message_handler(_text_update("secret"), None))
+    await asyncio.sleep(0.1)  # let it acquire the lease and persist PROCESSING
+
+    # Same user sends another photo mid-generation.
+    busy_msg = FakeMessage(photo=[FakePhoto("f2")], message_id=99)
+    await bot.message_handler(FakeUpdate(busy_msg), None)
+
+    # Rejected as busy, not treated as a password attempt.
+    assert any("Please wait" in r for r in busy_msg.replies), busy_msg.replies
+    assert 99 not in transport.deleted, "concurrent message must not be deleted"
+    # Flow not reset: still PROCESSING, receipts intact.
+    live = await sessions.get(111)
+    assert live.state == BotState.PROCESSING, live.state
+    assert live.receipt_file_ids == ["f1"]
+
+    await gen_task
+    assert len(transport.sent_docs) == 1, "the original generation must still deliver"
+    finished = await sessions.get(111)
+    assert finished.state == BotState.IDLE
+    assert finished.receipt_file_ids == []

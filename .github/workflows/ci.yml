@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # The repo's default branch is currently `master`; keep `main` too so CI
+    # survives a rename and runs on push, not just PRs.
+    branches: [master, main]
   pull_request:
 
 jobs:

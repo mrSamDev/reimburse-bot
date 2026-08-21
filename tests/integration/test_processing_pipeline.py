@@ -127,6 +127,24 @@ async def test_custom_title_falls_back_to_config(tmp_path):
     assert "Heading Travel Expenses" in text
 
 
+async def test_ai_call_budget_aborts_batch(tmp_path):
+    """Once the per-run paid AI call budget is spent, the whole batch aborts
+    instead of making further (costly) provider calls."""
+    cfg = Config(
+        ai_provider="openai", openai_api_key="x", temp_dir=tmp_path,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+        ai_retry_base_delay=0, ai_request_delay_seconds=0, ai_concurrency=1,
+        ai_max_calls_per_run=2,
+    )
+    svc = ProcessingService(
+        cfg, FakeProvider([_ext("A", "10"), _ext("B", "20"), _ext("C", "30")]), FakeTelegram()
+    )
+    with pytest.raises(ProcessingError):
+        await run_with_cleanup(svc, 1, ["f1", "f2", "f3"], cfg.temp_dir)
+    leftovers = [p for p in Path(cfg.temp_dir).iterdir() if p.name.startswith("request_")]
+    assert leftovers == []
+
+
 async def test_single_failing_receipt_does_not_destroy_batch(tmp_path):
     cfg = _config(tmp_path)
     # First provider call raises for every retry attempt; second succeeds.

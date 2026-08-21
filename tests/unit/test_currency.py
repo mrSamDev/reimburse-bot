@@ -51,3 +51,12 @@ def test_batch_total_property():
     b.add(_r("AED", "10"))
     b.add(_r("USD", "5"))
     assert b.total == Decimal("15")  # raw sum across receipts
+
+
+def test_totals_by_currency_are_quantized():
+    b = Batch()
+    b.add(_r("AED", "10.005"))
+    b.add(_r("USD", "1.999"))
+    totals = b.totals_by_currency()
+    assert totals["AED"] == Decimal("10.005").quantize(Decimal("0.01"))
+    assert totals["USD"] == Decimal("1.999").quantize(Decimal("0.01"))

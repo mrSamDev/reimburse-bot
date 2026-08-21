@@ -1,4 +1,9 @@
-"""ReportLab reimbursement report generator."""
+"""ReportLab reimbursement report generator.
+
+Layout mirrors the original ``Reimburse/pdf_report.py`` implementation: a
+compact 3-column table (Image | Receipt | Amount) with slim page margins
+(20mm sides, 18mm top/bottom) so far less page space is wasted on padding.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +15,9 @@ from xml.sax.saxutils import escape
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image,
     Paragraph,
@@ -25,67 +31,113 @@ from app.models.receipt import Batch
 
 logger = logging.getLogger(__name__)
 
-PAGE = A4
-MARGIN = 40 * mm
-USABLE = PAGE[0] - 2 * MARGIN
-COL_IMAGE = 118
-COL_CAPTION = USABLE - COL_IMAGE
-IMAGE_MAX_WIDTH = COL_IMAGE - 8
+# Column widths for the 3-column table (A4 portrait usable width ~170mm).
+COL_WIDTHS = [38 * mm, 92 * mm, 40 * mm]  # Image | Receipt | Amount
+
+# Default display width (points) for embedded receipt thumbnails.
+IMAGE_WIDTH_PT = 95.0
 
 
 def _money(value: Decimal) -> str:
     return f"{Decimal(value):,.2f}"
 
 
-def _styles() -> dict[str, ParagraphStyle]:
-    return {
-        "title": ParagraphStyle(
-            "title", fontName="Helvetica-Bold", fontSize=20, leading=24,
-            alignment=TA_LEFT, spaceAfter=2,
-        ),
-        "period": ParagraphStyle(
-            "period", fontName="Helvetica", fontSize=14, leading=18,
-            textColor=colors.grey, spaceAfter=16,
-        ),
-        "desc": ParagraphStyle(
-            "desc", fontName="Helvetica", fontSize=10, leading=13,
-            alignment=TA_LEFT,
-        ),
-        "head": ParagraphStyle(
-            "head", fontName="Helvetica-Bold", fontSize=11, leading=14,
-            textColor=colors.HexColor("#333333"),
-        ),
-        "total": ParagraphStyle(
-            "total", fontName="Helvetica-Bold", fontSize=12, leading=16,
-            alignment=TA_RIGHT,
-        ),
-        "subtotal": ParagraphStyle(
-            "subtotal", fontName="Helvetica", fontSize=10, leading=14,
-            alignment=TA_RIGHT, textColor=colors.grey,
-        ),
-    }
-
-
-def _scaled_image(path: str | Path) -> Image:
-    """Create an Image flowable scaled to the receipt column, aspect preserved."""
-    from PIL import Image as PILImage
-
-    with PILImage.open(path) as im:
-        w, h = im.size
-    aspect = h / w if w else 1.0
-    width = IMAGE_MAX_WIDTH
-    height = width * aspect
+def _scaled_image(path: Path, target_width_pt: float) -> Image:
+    """Return a ReportLab ``Image`` flowable scaled to ``target_width_pt`` while
+    preserving the source aspect ratio."""
+    reader = ImageReader(str(path))
+    iw, ih = reader.getSize()
+    width = target_width_pt
+    height = width * ih / iw if iw else width
     return Image(str(path), width=width, height=height)
 
 
-def _caption_cell(receipt) -> Paragraph:
-    """One-line caption: merchant (bold), optional date (grey), amount inline."""
-    name = escape(receipt.merchant_name)
-    caption = f"<b>{name}</b>"
-    if receipt.transaction_date:
-        caption += f' <font color="#6b7280">{escape(receipt.transaction_date)}</font>'
-    caption += f'<br/><b>{escape(receipt.currency)} {_money(receipt.total)}</b>'
-    return Paragraph(caption, _styles()["desc"])
+def _build_styles() -> dict[str, ParagraphStyle]:
+    """Return the paragraph styles used by the report."""
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle(
+        "RepH1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=20, leading=24, spaceAfter=6, textColor=colors.HexColor("#1a1a1a"),
+    )
+    h2 = ParagraphStyle(
+        "RepH2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=15, leading=18, spaceBefore=4, spaceAfter=10,
+        textColor=colors.HexColor("#333333"),
+    )
+    cell_left = ParagraphStyle(
+        "CellLeft", fontName="Helvetica", fontSize=9, leading=11, alignment=TA_LEFT,
+    )
+    cell_right = ParagraphStyle(
+        "CellRight", fontName="Helvetica", fontSize=9, leading=11, alignment=TA_RIGHT,
+    )
+    header_left = ParagraphStyle(
+        "HdrLeft", parent=cell_left, fontName="Helvetica-Bold",
+        textColor=colors.white,
+    )
+    header_right = ParagraphStyle(
+        "HdrRight", parent=cell_right, fontName="Helvetica-Bold",
+        textColor=colors.white,
+    )
+    total = ParagraphStyle(
+        "Total", fontName="Helvetica-Bold", fontSize=12, leading=15,
+        alignment=TA_RIGHT, spaceBefore=10,
+    )
+    return {
+        "h1": h1, "h2": h2,
+        "cell_left": cell_left, "cell_right": cell_right,
+        "header_left": header_left, "header_right": header_right,
+        "total": total,
+    }
+
+
+def _build_table(
+    rows: list[tuple[str, str, str | None]],
+    image_width_pt: float,
+    styles: dict,
+) -> Table:
+    """Build the 3-column (Image | Receipt | Amount) table for ``rows``.
+
+    ``rows`` items are ``(receipt_text, amount_display, image_path_or_None)``.
+    """
+    table_data = [[
+        Paragraph("", styles["header_left"]),
+        Paragraph("Receipt", styles["header_left"]),
+        Paragraph("Amount", styles["header_right"]),
+    ]]
+
+    for receipt_text, amount_display, image_path in rows:
+        img_cell = ""
+        if image_path and Path(image_path).exists():
+            try:
+                img_cell = _scaled_image(Path(image_path), image_width_pt)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not embed image %s: %s", image_path, exc)
+                img_cell = Paragraph("(image unavailable)", styles["cell_left"])
+        elif image_path:
+            img_cell = Paragraph("(image missing)", styles["cell_left"])
+        table_data.append([
+            img_cell,
+            Paragraph(escape(receipt_text), styles["cell_left"]),
+            Paragraph(escape(amount_display), styles["cell_right"]),
+        ])
+
+    table = Table(table_data, colWidths=COL_WIDTHS, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4a4a4a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("ALIGN", (2, 0), (2, -1), "RIGHT"),
+        ("ALIGN", (1, 0), (1, -1), "LEFT"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+         [colors.white, colors.HexColor("#f5f5f5")]),
+    ]))
+    return table
 
 
 def generate_report(
@@ -100,57 +152,40 @@ def generate_report(
 
     ``image_map`` maps ``source_file_id`` -> normalized image path so the
     original receipt image is embedded. Receipts without an image render as
-    text-only rows.
+    text-only rows. Margins and the 3-column layout match the original
+    ``Reimburse/pdf_report.py`` implementation.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     image_map = image_map or {}
-    st = _styles()
+    st = _build_styles()
 
     doc = SimpleDocTemplate(
         str(out_path),
-        pagesize=PAGE,
-        leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=MARGIN, bottomMargin=MARGIN,
-        title="Reimbursement Report",
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=title,
+        author="Reimbursement Report Generator",
     )
 
-    story = []
-    story.append(Paragraph(title, st["title"]))
+    story = [Paragraph(title, st["h1"])]
     if period:
-        story.append(Paragraph(period, st["period"]))
+        story.append(Paragraph(period, st["h2"]))
 
-    # Table: header row + one row per receipt. repeatRows=1 reprints the
-    # "Receipt" header on every page.
-    header = [[Paragraph("Receipt", st["head"])], []]
-    data_rows = []
+    # Row shape expected by the table: (receipt text, amount, image path).
+    rows: list[tuple[str, str, str | None]] = []
     for receipt in batch.receipts:
         image_path = image_map.get(receipt.source_file_id)
-        image_flowable = (
-            _scaled_image(image_path)
-            if image_path and Path(image_path).exists()
-            else ""
-        )
-        data_rows.append([image_flowable, _caption_cell(receipt)])
+        amount_display = f"{receipt.currency} {_money(receipt.total)}"
+        rows.append((receipt.merchant_name, amount_display, image_path))
 
-    table = Table([header] + data_rows, colWidths=[COL_IMAGE, COL_CAPTION], repeatRows=1)
-    table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LINEBELOW", (0, 1), (-1, -1), 0.4, colors.HexColor("#cccccc")),
-                ("LINEBELOW", (0, 0), (1, 0), 1, colors.HexColor("#999999")),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    story.append(table)
+    story.append(_build_table(rows, IMAGE_WIDTH_PT, st))
+    story.append(Spacer(1, 4 * mm))
 
     # Totals section. Never combine different currencies into one total.
-    story.append(Spacer(1, 14))
     if len(batch.currencies()) == 1:
         currency = batch.currencies()[0]
         total = batch.currency_totals[currency]
@@ -158,7 +193,8 @@ def generate_report(
     else:
         for currency in batch.currencies():
             total = batch.currency_totals[currency]
-            story.append(Paragraph(f"{currency} Total: {_money(total)}", st["subtotal"]))
+            story.append(Paragraph(f"{currency} Total: {_money(total)}", st["total"]))
 
     doc.build(story)
+    logger.info("PDF report written to %s", out_path)
     return out_path

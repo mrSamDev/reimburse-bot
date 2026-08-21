@@ -43,12 +43,14 @@ class Config(BaseModel):
     temp_dir: Path = PROJECT_ROOT / "temp"
     data_dir: Path = PROJECT_ROOT / "data"
     backup_dir: Path = PROJECT_ROOT / "backups"
+    backup_retention: int = 10
     ai_timeout_seconds: int = 60
     ai_retry_attempts: int = 3
     ai_retry_base_delay: float = 1.0
     ai_request_delay_seconds: float = 1.0
     ai_concurrency: int = 1
     ai_per_receipt_timeout_seconds: int = 120
+    ai_max_calls_per_run: int = 100
     max_processing_seconds: float = 600.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
@@ -150,6 +152,13 @@ class Config(BaseModel):
             raise ValueError("ai_per_receipt_timeout_seconds must be >= 1")
         return v
 
+    @field_validator("ai_max_calls_per_run")
+    @classmethod
+    def _check_ai_max_calls(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("ai_max_calls_per_run must be >= 1")
+        return v
+
     @field_validator("health_port")
     @classmethod
     def _check_health_port(cls, v: int) -> int:
@@ -162,6 +171,13 @@ class Config(BaseModel):
     def _check_maintenance_interval(cls, v: int) -> int:
         if v < 1:
             raise ValueError("maintenance_interval_seconds must be >= 1")
+        return v
+
+    @field_validator("backup_retention")
+    @classmethod
+    def _check_backup_retention(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("backup_retention must be >= 1")
         return v
 
     @field_validator("max_processing_seconds")
@@ -234,12 +250,14 @@ def _from_env() -> dict[str, Any]:
         "temp_dir": Path(get("TEMP_DIR", str(PROJECT_ROOT / "temp"))),
         "data_dir": Path(get("DATA_DIR", str(PROJECT_ROOT / "data"))),
         "backup_dir": Path(get("BACKUP_DIR", str(PROJECT_ROOT / "backups"))),
+        "backup_retention": int(get("BACKUP_RETENTION", "10")),
         "ai_timeout_seconds": int(get("AI_TIMEOUT_SECONDS", "60")),
         "ai_retry_attempts": int(get("AI_RETRY_ATTEMPTS", "3")),
         "ai_retry_base_delay": float(get("AI_RETRY_BASE_DELAY", "1.0")),
         "ai_request_delay_seconds": float(get("AI_REQUEST_DELAY_SECONDS", "1.0")),
         "ai_concurrency": int(get("AI_CONCURRENCY", "1")),
         "ai_per_receipt_timeout_seconds": int(get("AI_PER_RECEIPT_TIMEOUT_SECONDS", "120")),
+        "ai_max_calls_per_run": int(get("AI_MAX_CALLS_PER_RUN", "100")),
         "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "600")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),

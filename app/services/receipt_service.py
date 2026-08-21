@@ -45,6 +45,14 @@ class ProcessingError(Exception):
     """Raised when processing cannot produce any usable report."""
 
 
+class BudgetExceededError(ProcessingError):
+    """Raised when the per-run AI call budget is exhausted mid-batch.
+
+    Subclass of :class:`ProcessingError` so it aborts the whole batch rather
+    than being treated as a single-receipt failure.
+    """
+
+
 @dataclass
 class ProcessingResult:
     batch: Batch
@@ -62,6 +70,25 @@ class _ReceiptOutcome:
     receipt: Receipt | None = None
     failed: bool = False
     reason: str = ""
+
+
+@dataclass
+class _CallBudget:
+    """Per-run counter of paid AI extraction calls.
+
+    Incremented synchronously in the event loop (never across an ``await``), so
+    it is safe to share across the concurrent receipts of one batch.
+    """
+
+    max_calls: int
+    used: int = 0
+
+    def acquire(self) -> bool:
+        """Reserve one call; return False when the budget is exhausted."""
+        if self.used >= self.max_calls:
+            return False
+        self.used += 1
+        return True
 
 
 def make_request_base(temp_root: str | Path, request_id: str) -> Path:
@@ -83,8 +110,11 @@ async def _extract_with_retry(
     *,
     max_attempts: int = 3,
     base_delay: float = 1.0,
+    deadline: float | None = None,
+    budget: _CallBudget | None = None,
     _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     _rand: Callable[[], float] = random.random,
+    _now: Callable[[], float] | None = None,
 ) -> ReceiptExtraction:
     """Extract a receipt, retrying transient provider failures with backoff.
 
@@ -92,13 +122,39 @@ async def _extract_with_retry(
     transient). Validation errors are not retried because the AI already
     returned data that failed hard checks. Backoff uses full jitter to avoid a
     thundering herd on a recovering provider. Raises after ``max_attempts``.
-    ``_sleep``/``_random`` are injectable for deterministic tests.
+    ``_sleep``/``_random``/``_now`` are injectable for deterministic tests.
 
     Rate-limit responses (HTTP 429) are retried with a longer backoff that
     respects the server's ``Retry-After`` hint, capped at :data:`MAX_RATE_LIMIT_DELAY`.
     Other :class:`AIProviderError` failures use full-jitter exponential backoff.
+
+    ``deadline`` (a monotonic-clock timestamp, as returned by
+    ``asyncio.get_running_loop().time()``) caps each backoff sleep to the time
+    actually remaining and stops scheduling retries once it is spent, so a long
+    rate-limit wait is never later killed by the enclosing per-receipt
+    ``wait_for`` (which would have made the spent sleep worthless).
+
+    ``budget`` (:class:`_CallBudget`) stops extraction as soon as the per-run
+    paid-call budget is exhausted, raising :class:`BudgetExceededError`.
     """
+    loop = asyncio.get_running_loop()
+    now = _now or loop.time
+
+    async def _sleep_backoff(delay: float, exc: BaseException) -> None:
+        """Sleep ``delay`` unless the deadline is already spent; else stop."""
+        if deadline is None:
+            await _sleep(delay)
+            return
+        remaining = deadline - now()
+        if remaining <= 0:
+            raise exc
+        await _sleep(min(delay, remaining))
+
     for attempt in range(max_attempts):
+        if budget is not None and not budget.acquire():
+            raise BudgetExceededError(
+                f"AI call budget ({budget.max_calls}) exhausted for this run"
+            )
         metrics.inc("ai_calls")
         try:
             return await asyncio.to_thread(provider.extract_receipt, image_path)
@@ -117,14 +173,14 @@ async def _extract_with_retry(
                 delay = retry_after if retry_after is not None else base_delay * (2**attempt)
             delay = min(delay, MAX_RATE_LIMIT_DELAY)
             delay = delay * (1 + _rand())
-            await _sleep(delay)
-        except AIProviderError:
+            await _sleep_backoff(delay, exc)
+        except AIProviderError as exc:
             metrics.inc("ai_errors")
             if attempt == max_attempts - 1:
                 raise
             # Full jitter: sleep in [0, base_delay * (attempt+1)].
             delay = base_delay * (attempt + 1) * _rand()
-            await _sleep(delay)
+            await _sleep_backoff(delay, exc)
     raise AIProviderError("unreachable")  # pragma: no cover
 
 
@@ -204,6 +260,7 @@ class ProcessingService:
             loop = asyncio.get_running_loop()
             budget = self._config.max_processing_seconds
             deadline = (loop.time() + budget) if budget > 0 else None
+            call_budget = _CallBudget(max_calls=self._config.ai_max_calls_per_run)
 
             def _check_deadline() -> None:
                 # Soft total-time check: enforced after the concurrent phase, before
@@ -220,7 +277,9 @@ class ProcessingService:
 
                 async def _limited(file_id, idx):
                     async with sem:
-                        result = await self._process_one(file_id, idx, input_dir, normalized_dir)
+                        result = await self._process_one(
+                            file_id, idx, input_dir, normalized_dir, call_budget
+                        )
                         # Pause before the next request so requests are spaced
                         # ``ai_request_delay_seconds`` apart (1-by-1 when
                         # concurrency=1). Holding the semaphore during the sleep
@@ -243,6 +302,8 @@ class ProcessingService:
                         raise ProcessingError(
                             f"Processing time limit ({budget}s) exceeded"
                         ) from exc
+                    except BudgetExceededError as exc:
+                        raise ProcessingError(str(exc)) from exc
                 else:
                     outcomes = await gather
 
@@ -330,10 +391,14 @@ class ProcessingService:
         idx: int,
         input_dir: Path,
         normalized_dir: Path,
+        call_budget: _CallBudget | None = None,
     ) -> _ReceiptOutcome:
         raw_path = input_dir / f"receipt_{idx:03d}.img"
         norm_path = normalized_dir / f"receipt_{idx:03d}.jpg"
         timeout = self._config.ai_per_receipt_timeout_seconds
+        # Monotonic deadline shared by retry backoff capping and the hard
+        # ``wait_for`` backstop, so a long rate-limit wait cannot exceed it.
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
             async def _work():
                 await self._telegram.download_file(file_id, raw_path)
@@ -351,11 +416,15 @@ class ProcessingService:
                     norm_path,
                     max_attempts=self._config.ai_retry_attempts,
                     base_delay=self._config.ai_retry_base_delay,
+                    deadline=deadline,
+                    budget=call_budget,
                 )
 
             extraction = await asyncio.wait_for(_work(), timeout=timeout)
             receipt = validate_extraction(extraction, file_id)
             return _ReceiptOutcome(receipt=receipt)
+        except BudgetExceededError:
+            raise  # whole-batch abort, not a per-receipt failure
         except (asyncio.TimeoutError, TimeoutError):
             return _ReceiptOutcome(failed=True, reason="timeout")
         except RECEIPT_FAILURE_EXCEPTIONS as exc:

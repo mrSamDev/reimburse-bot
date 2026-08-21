@@ -1,6 +1,7 @@
 # --- Reimbursement Bot image ----------------------------------------------
 # Requirements: slim base, non-root user, runtime env vars, temp filesystem,
-# no secrets baked in.
+# no secrets baked in. ~222MB — nixpacks produces a ~1GB image (Nix toolchain
+# in a fat Ubuntu base), so a hand-written Dockerfile is used for size.
 
 FROM python:3.12-slim
 
@@ -15,8 +16,10 @@ RUN pip install --no-cache-dir -r requirements.lock
 
 COPY app ./app
 
-# Temporary storage on a tmpfs volume (declared in compose); owned by non-root.
-RUN mkdir -p /tmp/reimbursement && chown -R bot:bot /tmp/reimbursement
+# Durable state dirs (SQLite ledger + sessions + backups) and tmpfs scratch,
+# all owned by the non-root user. Named volumes inherit these on first mount.
+RUN mkdir -p /app/data /app/backups /tmp/reimbursement \
+ && chown -R bot:bot /app/data /app/backups /tmp/reimbursement
 
 USER bot
 

@@ -242,6 +242,48 @@ async def test_sweep_reclaims_stale_lease(tmp_path):
     assert await store.try_acquire_processing(1) is True
 
 
+async def test_regression_save_preserves_processing_lease(tmp_path):
+    """A handler's ``save()`` during generation must NOT reset the DB lease (Bug A).
+
+    Every handler ends in ``sessions.save(session)``. While a generation holds
+    the per-user processing lease (``processing=1``), a concurrent command or
+    message triggers ``save()``; that save must leave the lease untouched or a
+    second instance can steal it (double extraction / double billing).
+    """
+    store = _store(tmp_path)
+    assert await store.try_acquire_processing(5) is True
+
+    # Any handler calls save() at the end of its work.
+    s = await store.get(5)
+    s.chat_id = 999
+    await store.save(s)
+
+    # The lease must survive the save.
+    assert await store.is_processing(5) is True
+    # A second instance must NOT be able to steal the slot.
+    assert await store.try_acquire_processing(5) is False
+    # Non-lease fields are still persisted normally.
+    assert (await store.get(5)).chat_id == 999
+
+
+async def test_report_title_persists_across_save_load(tmp_path):
+    """The user-entered report heading must survive a save/load round-trip.
+
+    Regression: ``report_title`` was in-memory only and dropped on save, so
+    the heading set during the heading step was lost when the session was
+    reloaded at the password step (falling back to the env default title).
+    """
+    store = _store(tmp_path)
+    s = await store.get(7)
+    s.report_title = "My Custom July Expenses"
+    s.state = BotState.AWAITING_PASSWORD
+    await store.save(s)
+
+    reloaded = await store.get(7)
+    assert reloaded.report_title == "My Custom July Expenses"
+    assert reloaded.state == BotState.AWAITING_PASSWORD
+
+
 async def test_sweep_purges_expired_sessions(tmp_path):
     store = _store(tmp_path, ttl_seconds=30)
     past = datetime.now(timezone.utc) - timedelta(seconds=31)

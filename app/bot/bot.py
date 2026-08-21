@@ -140,6 +140,13 @@ class ReimbursementBot:
         session = await self.sessions.get(user.id)
         session.chat_id = chat.id
 
+        if session.state == BotState.PROCESSING:
+            # A generation is in flight for this user. Reject any further input
+            # now so it is never misread as a password/heading attempt, and so
+            # no save() touches the row mid-generation.
+            await self._reply(update, msg.BUSY)
+            return
+
         if session.state == BotState.AWAITING_PASSWORD:
             await self._password_attempt(update, session)
             return
@@ -227,6 +234,11 @@ class ReimbursementBot:
             session.state = BotState.IDLE
             await self.sessions.save(session)
             return
+        # Persist PROCESSING before the long-running work so a concurrent message
+        # routes to the busy guard above rather than being read as a password or
+        # heading. save() no longer clobbers the processing lease.
+        session.state = BotState.PROCESSING
+        await self.sessions.save(session)
         # One id for the whole generation so every log line — including the
         # catch-all below — is attributable to the same request.
         request_id = uuid.uuid4().hex[:6]

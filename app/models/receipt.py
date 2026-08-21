@@ -149,7 +149,4 @@ class Batch(BaseModel):
 
     def totals_by_currency(self) -> dict[str, Decimal]:
         """Return currency totals rounded to 2 decimal places."""
-        return {
-            c: (t.quantize(Decimal("0.01")) if t == t else t)
-            for c, t in self.currency_totals.items()
-        }
+        return {c: t.quantize(Decimal("0.01")) for c, t in self.currency_totals.items()}

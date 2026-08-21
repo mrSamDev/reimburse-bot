@@ -17,7 +17,8 @@ class Session(BaseModel):
     """Per-user transient conversation session.
 
     Stores only Telegram ``file_id`` values, never the receipt images
-    themselves. Kept in memory; not persisted to a database in V1.
+    themselves. Persisted to SQLite via :class:`SessionStore` (repository-style:
+    mutate a detached snapshot, then ``save()``).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

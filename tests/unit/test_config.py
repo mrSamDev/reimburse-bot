@@ -125,3 +125,37 @@ def test_env_file_loading(tmp_path):
     cfg = load_config(env_file=env, strict=False)
     assert cfg.allowed_user_ids == [1, 2, 3]
     assert cfg.max_receipts == 5
+
+
+def test_backup_retention_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("BACKUP_RETENTION", raising=False)
+    cfg = load_config(strict=False)
+    assert cfg.backup_retention == 10
+
+    env = tmp_path / ".env"
+    env.write_text("BACKUP_RETENTION=3\n")
+    cfg = load_config(env_file=env, strict=False)
+    assert cfg.backup_retention == 3
+
+
+def test_backup_retention_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("BACKUP_RETENTION", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
+
+
+def test_ai_max_calls_per_run_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_MAX_CALLS_PER_RUN", raising=False)
+    assert load_config(strict=False).ai_max_calls_per_run == 100
+
+    env = tmp_path / ".env"
+    env.write_text("AI_MAX_CALLS_PER_RUN=3\n")
+    assert load_config(env_file=env, strict=False).ai_max_calls_per_run == 3
+
+
+def test_ai_max_calls_per_run_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("AI_MAX_CALLS_PER_RUN", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)

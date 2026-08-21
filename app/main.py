@@ -23,8 +23,11 @@ from app.services.telegram_service import TelegramService
 logger = logging.getLogger(__name__)
 
 
-async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
-    """Periodically run the session maintenance sweep (reclaim + purge)."""
+async def _maintenance_loop(
+    sweeper, interval_seconds: float, evict_idle=None
+) -> None:
+    """Periodically run the session maintenance sweep (reclaim + purge) and
+    evict idle per-user locks so their memory does not grow unboundedly."""
     while True:
         await asyncio.sleep(interval_seconds)
         try:
@@ -38,15 +41,25 @@ async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
                 )
         except Exception:
             logger.exception("maintenance sweep failed")
+        if evict_idle is not None:
+            try:
+                evicted = evict_idle()
+                if evicted:
+                    logger.info("evicted %d idle user locks", evicted)
+            except Exception:
+                logger.exception("lock eviction failed")
 
 
-def _make_post_init(sessions: SessionStore, interval_seconds: float):
+def _make_post_init(
+    sessions: SessionStore, interval_seconds: float, locks=None
+):
     """Return a ``post_init`` that starts the maintenance task and tracks it.
 
     PTB's ``Application`` uses ``__slots__``, so the task reference is held in a
     closure (never attached to the app object). ``post_shutdown`` cancels and
     awaits the task so it is reaped cleanly at shutdown instead of leaking.
     """
+    evict_idle = locks.evict_idle if locks is not None else None
     holder: dict = {"task": None}
 
     async def _post_shutdown(_app) -> None:
@@ -62,7 +75,7 @@ def _make_post_init(sessions: SessionStore, interval_seconds: float):
     async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
         holder["task"] = asyncio.get_running_loop().create_task(
-            _maintenance_loop(sessions.sweep, interval_seconds)
+            _maintenance_loop(sessions.sweep, interval_seconds, evict_idle)
         )
 
     return _post_init
@@ -110,6 +123,11 @@ def build_application(
     app.add_handler(CommandHandler("cancel", bot.cancel_command))
     app.add_handler(CommandHandler("generate", bot.generate_command))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.TEXT, bot.message_handler))
+    # Start the background maintenance loop (session sweep + idle-lock eviction)
+    # in ``post_init``, using the same sessions + bot locks this app owns.
+    app.post_init = _make_post_init(
+        sessions, config.maintenance_interval_seconds, bot.locks
+    )
     return app
 
 
@@ -164,14 +182,13 @@ def main() -> None:
     # Durable backup of the audit + session DBs before we start serving.
     ledger = ReceiptLedger(config.data_dir / "receipts.db")
     try:
-        ledger.backup(config.backup_dir)
-        sessions.backup(config.backup_dir)
+        ledger.backup(config.backup_dir, retention=config.backup_retention)
+        sessions.backup(config.backup_dir, retention=config.backup_retention)
         logger.info("backed up state DBs to %s", config.backup_dir)
     except FileNotFoundError as exc:
         logger.warning("backup skipped: %s", exc)
 
     application = build_application(config, sessions=sessions, ledger=ledger)
-    application.post_init = _make_post_init(sessions, config.maintenance_interval_seconds)
     _start_health_server(config)
     application.run_polling(drop_pending_updates=True)
 

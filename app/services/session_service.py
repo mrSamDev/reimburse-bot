@@ -12,7 +12,7 @@ from app.bot.states import BotState
 from app.models.session import Session
 from app.services.backup_service import backup_database
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -29,10 +29,13 @@ _MIGRATIONS: dict[int, str] = {
     2: """
     ALTER TABLE sessions ADD COLUMN lease_expiry TEXT;
     """,
+    3: """
+    ALTER TABLE sessions ADD COLUMN report_title TEXT NOT NULL DEFAULT '';
+    """,
 }
 
 _COLUMNS = ("user_id", "chat_id", "state", "receipt_file_ids",
-            "created_at", "updated_at")
+            "report_title", "created_at", "updated_at")
 
 
 def _utc_now() -> str:
@@ -92,6 +95,7 @@ class SessionStore:
             chat_id=row["chat_id"],
             state=BotState(row["state"]),
             receipt_file_ids=json.loads(row["receipt_file_ids"]),
+            report_title=row["report_title"] or "",
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -102,6 +106,7 @@ class SessionStore:
             session.chat_id,
             session.state.value,
             json.dumps(session.receipt_file_ids),
+            session.report_title,
             session.created_at.isoformat(),
             session.updated_at.isoformat(),
         )
@@ -130,7 +135,8 @@ class SessionStore:
                 "ON CONFLICT(user_id) DO UPDATE SET "
                 "chat_id=excluded.chat_id, state=excluded.state, "
                 "receipt_file_ids=excluded.receipt_file_ids, "
-                "processing=excluded.processing, updated_at=excluded.updated_at",
+                "report_title=excluded.report_title, "
+                "updated_at=excluded.updated_at",
                 self._session_to_row(session),
             )
             conn.commit()
@@ -262,7 +268,7 @@ class SessionStore:
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
-                (user_id, user_id, BotState.IDLE.value, json.dumps([]), lease, lease),
+                (user_id, user_id, BotState.IDLE.value, json.dumps([]), "", lease, lease),
             )
             self._reclaim_expired_leases(conn, lease, user_id)
             cur = conn.execute(
@@ -305,9 +311,9 @@ class SessionStore:
     async def is_processing(self, user_id: int) -> bool:
         return await asyncio.to_thread(self._op_is_processing, user_id)
 
-    def backup(self, target_dir: str | Path) -> Path:
+    def backup(self, target_dir: str | Path, *, retention: int | None = None) -> Path:
         """Write a durable copy of the sessions DB into ``target_dir``."""
-        return backup_database(self._db_path, target_dir, label="sessions")
+        return backup_database(self._db_path, target_dir, label="sessions", retention=retention)
 
     def _op_count(self) -> int:
         conn = self._connect()

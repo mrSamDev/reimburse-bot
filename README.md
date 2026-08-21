@@ -70,8 +70,10 @@ python -m app.main         # start long polling
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |
 | `AI_PER_RECEIPT_TIMEOUT_SECONDS` | Hard per-receipt processing timeout (default 120) |
+| `AI_MAX_CALLS_PER_RUN` | Max paid AI extraction calls per report; the batch aborts when exceeded (default 100) |
 | `LOG_FORMAT` | `text` or `json` structured logs (default `text`) |
 | `BACKUP_DIR` | Directory for durable DB backups (default `backups/`) |
+| `BACKUP_RETENTION` | Max backup copies kept per database; older ones pruned at startup (default 10) |
 | `HEALTH_ENABLED` | Serve `/health` + `/metrics` on `HEALTH_PORT` (default `false`) |
 | `HEALTH_PORT` | HTTP port for the health/metrics server (default 8080) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
@@ -89,14 +91,57 @@ python -m app.main         # start long polling
 
 Send a photo or a JPEG/PNG/WEBP image document to stage a receipt.
 
-## Docker
+## Docker (VPS deployment)
+
+The image is built **without a Dockerfile** using [nixpacks](https://nixpacks.com)
+(the build plan lives in `nixpacks.toml`: pinned Python 3.12, hash-pinned
+`requirements.lock`, correct entrypoint). The container runs as a **non-root**
+user (uid 1000) with a tmpfs for temporary files. Secrets are injected at
+runtime via `.env` and are never baked into the image. Durable state
+(`receipts.db`, `sessions.db`, and their backups) is persisted in named Docker
+volumes (`data`, `backups`) so it survives container restarts/rebuilds.
+
+### Deploy on a VPS
+
+1. Copy the repo to the VPS and enter it:
+   ```bash
+   git clone <your-repo-url> telegram-reimbursement-bot
+   cd telegram-reimbursement-bot
+   ```
+2. Create your secrets file from the template (never commit it):
+   ```bash
+   cp .env.example .env
+   # edit .env — set TELEGRAM_TOKEN, ALLOWED_USER_IDS, ALLOWED_CHAT_IDS,
+   # BOT_PASSWORD, and the AI provider settings (OPENAI_API_KEY or OLLAMA_*)
+   ```
+3. One-shot build + start (runs `nixpacks build` then `docker compose up`):
+   ```bash
+   ./deploy.sh
+   ```
+   Or manually:
+   ```bash
+   nixpacks build . --name reimbursement-bot:latest
+   docker compose up -d
+   ```
+4. Watch startup logs (first poll / DB init / backup happens here):
+   ```bash
+   docker compose logs -f
+   ```
+   The container restarts automatically (`restart: unless-stopped`).
+
+### Upgrade after a code change
 
 ```bash
-docker compose up --build -d
+git pull
+./deploy.sh        # rebuild image, reuse existing volumes (state preserved)
 ```
 
-The image runs as a non-root user with a tmpfs for temporary files. Secrets are
-injected at runtime via `.env` and are never baked into the image.
+To inspect persisted state:
+
+```bash
+docker volume inspect reimbursement-bot_data
+docker compose exec bot sh -c 'ls -la /app/data /app/backups'
+```
 
 ## Tests
 

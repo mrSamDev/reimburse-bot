@@ -169,9 +169,9 @@ class ReceiptLedger:
         finally:
             conn.close()
 
-    def backup(self, target_dir: str | Path) -> Path:
+    def backup(self, target_dir: str | Path, *, retention: int | None = None) -> Path:
         """Write a durable copy of the audit ledger DB into ``target_dir``."""
-        return backup_database(self._db_path, target_dir, label="receipts")
+        return backup_database(self._db_path, target_dir, label="receipts", retention=retention)
 
     def summary(self) -> dict[str, int]:
         """Aggregate counts for a period-less reconciliation."""

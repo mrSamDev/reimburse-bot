@@ -62,14 +62,16 @@ def test_two_receipts(tmp_path):
     assert "Total: AED 30.00" in text
 
 
-def test_twenty_receipts_multipage(tmp_path):
-    receipts = [_r(f"Receipt {i}", i + 1) for i in range(20)]
+def test_many_receipts_multipage(tmp_path):
+    # The compact og layout fits ~30 text-only rows per page, so use enough to
+    # genuinely exercise pagination.
+    receipts = [_r(f"Receipt {i}", i + 1) for i in range(40)]
     b = _batch(receipts)
-    out = generate_report(b, tmp_path / "twenty.pdf")
+    out = generate_report(b, tmp_path / "many.pdf")
     reader = PdfReader(str(out))
     assert len(reader.pages) > 1
     text = _text(out)
-    assert "Total: AED 210.00" in text
+    assert "Total: AED 820.00" in text
 
 
 def test_review_warning_hidden_in_pdf(tmp_path):

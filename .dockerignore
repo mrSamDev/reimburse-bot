@@ -1,0 +1,30 @@
+# Secrets — never send to the build context or bake into the image.
+.env
+*.env
+!.env.example
+
+# VCS / local tooling
+.git
+.venv
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Durable runtime data — mounted from named volumes at runtime, not in image.
+data
+backups
+temp
+
+# Large / non-source artifacts
+*.pdf
+reference_report.pdf
+dist/
+build/
+plan.md
+REVIEW.md
+
+.DS_Store
