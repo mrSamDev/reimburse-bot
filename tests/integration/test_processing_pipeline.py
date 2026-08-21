@@ -1,6 +1,7 @@
 """Integration tests for the processing pipeline using fakes."""
 
 import logging
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from PIL import Image
 from app.ai.base import AIProviderError, ReceiptExtraction
 from app.config import Config
 from app.services import file_validation
+from app.services.ledger_service import ReceiptLedger
 from app.services.receipt_service import (
     ProcessingError,
     ProcessingService,
@@ -193,3 +195,39 @@ async def test_pdf_contains_receipt_descriptions(tmp_path):
     assert "Ride with Sazzad" in delivered["text"]
     assert "Bolt" in delivered["text"]
     assert "126.50" in delivered["text"]  # total
+
+
+async def test_ledger_persists_accepted_receipt(tmp_path):
+    cfg = _config(tmp_path)
+    ledger = ReceiptLedger(tmp_path / "ledger.db")
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10")]), FakeTelegram(), ledger=ledger)
+    result = await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+    assert ledger.count() == 1
+    row = ledger.all()[0]
+    assert row["merchant_name"] == "A"
+    assert row["total"] == Decimal("10")
+    assert row["user_id"] == 1
+    assert row["request_id"] == result.request_id
+
+
+async def test_ledger_idempotent_across_rerun(tmp_path):
+    cfg = _config(tmp_path)
+    ledger = ReceiptLedger(tmp_path / "ledger.db")
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10")]), FakeTelegram(), ledger=ledger)
+    await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+    await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+    assert ledger.count() == 1  # same file_id deduplicated
+
+
+async def test_ledger_records_multiple_receipts(tmp_path):
+    cfg = _config(tmp_path)
+    ledger = ReceiptLedger(tmp_path / "ledger.db")
+    svc = ProcessingService(
+        cfg,
+        FakeProvider([_ext("A", "10"), _ext("B", "20")]),
+        FakeTelegram(),
+        ledger=ledger,
+    )
+    await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    assert ledger.count() == 2
+    assert ledger.all()[1]["total"] == Decimal("20")

@@ -48,6 +48,9 @@ python -m app.main         # start long polling
 | `MAX_RECEIPTS` | Max receipts per report (default 20) |
 | `MAX_FILE_SIZE_MB` | Max image size (default 10) |
 | `TEMP_DIR` | Temporary processing root |
+| `DATA_DIR` | Persistent data root (holds the `receipts.db` audit ledger) |
+| `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
+| `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
 
 ## Commands

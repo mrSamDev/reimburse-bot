@@ -17,6 +17,10 @@ htmlcov/
 temp/*
 !temp/.gitkeep
 
+# Durable runtime data (audit ledger DB)
+data/*
+!data/.gitkeep
+
 # Local OS noise
 .DS_Store
 

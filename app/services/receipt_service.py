@@ -15,6 +15,7 @@ from app.config import Config
 from app.models.receipt import Batch, Receipt
 from app.services import file_validation
 from app.services.cleanup_service import cleanup_request_dir
+from app.services.ledger_service import ReceiptLedger
 from app.services.pdf_service import generate_report
 from app.services.telegram_service import TelegramService
 from app.utils import images
@@ -101,10 +102,27 @@ class ProcessingService:
         config: Config,
         provider: ReceiptVisionProvider,
         telegram: TelegramService,
+        ledger: ReceiptLedger | None = None,
     ) -> None:
         self._config = config
         self._provider = provider
         self._telegram = telegram
+        self._ledger = ledger
+
+    def _to_entry(self, receipt: Receipt, request_id: str, user_id: int) -> dict:
+        """Map a validated receipt to an audit-ledger row."""
+        return {
+            "user_id": user_id,
+            "file_id": receipt.source_file_id,
+            "merchant_name": receipt.merchant_name,
+            "transaction_date": receipt.transaction_date,
+            "currency": receipt.currency,
+            "total": receipt.total,
+            "review_required": receipt.review_required,
+            "status": "accepted",
+            "request_id": request_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     async def process(
         self,
@@ -147,6 +165,13 @@ class ProcessingService:
                     image_map[receipt.source_file_id] = str(
                         normalized_dir / f"receipt_{idx:03d}.jpg"
                     )
+                    if self._ledger is not None:
+                        # Audit the accepted receipt immediately (idempotent by
+                        # file_id) so a later PDF failure still leaves a trail.
+                        await asyncio.to_thread(
+                            self._ledger.insert,
+                            self._to_entry(receipt, request_id, user_id),
+                        )
 
                 if not batch.receipts:
                     raise ProcessingError(

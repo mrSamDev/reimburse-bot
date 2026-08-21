@@ -11,6 +11,7 @@ from app.ai.ollama_provider import build_provider
 from app.bot.bot import ReimbursementBot
 from app.config import PROJECT_ROOT, Config, ConfigError, load_config
 from app.services.cleanup_service import sweep_orphaned_requests
+from app.services.ledger_service import ReceiptLedger
 from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
@@ -39,7 +40,8 @@ def build_application(config: Config) -> Application:
         max_file_size_mb=config.max_file_size_mb,
     )
     provider_impl = build_provider(config)
-    processing = ProcessingService(config, provider_impl, telegram)
+    ledger = ReceiptLedger(config.data_dir / "receipts.db")
+    processing = ProcessingService(config, provider_impl, telegram, ledger=ledger)
     bot = ReimbursementBot(config, security, sessions, telegram, provider_impl, processing)
 
     app = application
