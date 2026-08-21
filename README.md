@@ -111,6 +111,15 @@ Nixpacks builds the image; the plan lives in `nixpacks.toml` with pinned Python 
    ```
    The container restarts automatically (`restart: unless-stopped`).
 
+> **Single-instance guard**: the bot holds a flock on `data/instance.lock`
+> (on the shared `data` volume) for its whole lifetime. A second instance —
+> another container sharing the volume, or a stray local run against the same
+> `DATA_DIR` — fails fast with `exit 1` and a clear "another bot instance is
+> already running" log line instead of 409-conflicting on Telegram's
+> `getUpdates`. That crash-loop is the loud signal that a duplicate container
+> exists; remove the duplicate (set `replicas: 1`, stop extra containers),
+> don't try to outrun it.
+
 ### Upgrade after a code change
 
 ```bash

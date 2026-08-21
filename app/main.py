@@ -21,6 +21,7 @@ from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
 from app.services.telegram_service import TelegramService
+from app.utils.singleton import InstanceLock
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,20 @@ def main() -> None:
                 "Check the runtime user owns the mount (TEMP_DIR/DATA_DIR/BACKUP_DIR)."
             ) from exc
 
+    # Single-instance guard. The lock file sits on the shared data volume, so
+    # a duplicate container sharing that volume competes for the same lock.
+    # Take it before touching any shared state (orphan sweep, session purge,
+    # backup) so a second instance fails loudly instead of 409-conflicting on
+    # getUpdates and silently dropping updates.
+    instance_lock = InstanceLock(config.data_dir / "instance.lock")
+    if not instance_lock.acquire():
+        logger.error(
+            "another bot instance is already running (lock held on %s); "
+            "refusing to start a second poller",
+            instance_lock.path,
+        )
+        raise SystemExit(1)
+
     # Sweep orphaned request dirs from a previous hard kill (SIGKILL/OOM).
     logger.info(
         "config: concurrency=%d request_delay=%.1fs retries=%d retry_delay=%.1fs "
@@ -213,7 +228,12 @@ def main() -> None:
 
     application = build_application(config, sessions=sessions, ledger=ledger)
     _start_health_server(config)
-    application.run_polling(drop_pending_updates=True)
+    try:
+        application.run_polling(drop_pending_updates=True)
+    finally:
+        # Release the lock on clean shutdown; if we were SIGKILLed/OOM'd the
+        # kernel already released it via fd close.
+        instance_lock.release()
 
 
 if __name__ == "__main__":
