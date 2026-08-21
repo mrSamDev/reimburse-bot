@@ -30,7 +30,12 @@ async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
         try:
             result = await sweeper()
             if result.get("reclaimed") or result.get("purged"):
-                logger.info("maintenance sweep: %s", result)
+                # result is a dict; use named mapping-style formatting so the
+                # dict is consumed as a mapping, not exploded as positional args.
+                logger.info(
+                    "maintenance sweep: reclaimed=%(reclaimed)d purged=%(purged)d",
+                    result,
+                )
         except Exception:
             logger.exception("maintenance sweep failed")
 
