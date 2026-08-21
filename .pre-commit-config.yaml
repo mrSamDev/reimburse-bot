@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        entry: .venv/bin/ruff check app tests
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy (type-check app)
+        entry: .venv/bin/mypy app
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest (full suite)
+        entry: .venv/bin/python -m pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
