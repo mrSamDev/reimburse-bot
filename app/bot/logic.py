@@ -30,8 +30,11 @@ def handle_clear(session) -> tuple:
 
 
 def handle_cancel(session) -> tuple:
-    # Only meaningful when awaiting the password; otherwise a no-op.
-    return BotState.IDLE, msg.CANCELLED
+    # /cancel only aborts the heading/password flow. Outside it, it is a no-op
+    # so a collecting session is not reset to IDLE while its receipts stay staged.
+    if session.state in (BotState.AWAITING_HEADING, BotState.AWAITING_PASSWORD):
+        return BotState.IDLE, msg.CANCELLED
+    return session.state, None
 
 
 def handle_generate(session, *, has_password: bool, processing: bool) -> tuple:

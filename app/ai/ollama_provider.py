@@ -7,8 +7,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app.ai.base import AIProviderError, ReceiptExtraction, ReceiptVisionProvider
-from app.ai.openai_provider import OpenAIProvider, _extract_json
+from openai import RateLimitError  # noqa: E402  (hard runtime dependency)
+
+from app.ai.base import AIProviderError, AIRateLimitError, ReceiptExtraction, ReceiptVisionProvider
+from app.ai.openai_provider import (
+    OpenAIProvider,
+    _extract_json,
+    _parse_retry_after,
+    _retry_after_header,
+)
 from app.config import Config
 
 logger = logging.getLogger(__name__)
@@ -29,6 +36,10 @@ class OllamaProvider(ReceiptVisionProvider):
         self._client = OpenAI(
             api_key=config.ollama_api_key or "ollama",
             base_url=config.ollama_base_url,
+            # max_retries=0: disable the SDK's built-in auto-retry so the app's
+            # own pacing/backoff (see _extract_with_retry) is the only retry
+            # layer, matching OpenAIProvider.
+            max_retries=0,
         )
         self._model = config.ollama_model or "llava"
         self._timeout = config.ai_timeout_seconds
@@ -58,6 +69,16 @@ class OllamaProvider(ReceiptVisionProvider):
             return ReceiptExtraction(**parsed)
         except AIProviderError:
             raise
+        except RateLimitError as exc:
+            # Surface 429s as AIRateLimitError so the shared rate-limit backoff
+            # (Retry-After / TPM-window handling) applies, matching OpenAIProvider.
+            err_type = getattr(exc, "type", None) or getattr(exc, "code", None)
+            logger.info("ollama 429: type=%r code=%r", err_type, getattr(exc, "code", None))
+            raise AIRateLimitError(
+                f"Ollama rate limited [{err_type or 'unknown'}]: {exc}",
+                retry_after=_parse_retry_after(_retry_after_header(exc)),
+                kind=err_type,
+            ) from exc
         except Exception as exc:
             raise AIProviderError(f"Ollama request failed: {exc}") from exc
 

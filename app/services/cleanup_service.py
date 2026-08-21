@@ -35,6 +35,10 @@ def sweep_orphaned_requests(temp_root: str | Path) -> int:
     removed = 0
     if not root.exists():
         return 0
+    # Known risk: this deletes every request_* dir at startup with no age check
+    # or instance scoping. Safe today because Docker uses a per-container tmpfs;
+    # if TEMP_DIR is ever a shared volume across instances, one instance's
+    # startup sweep would destroy another's in-flight request dirs.
     for entry in root.iterdir():
         if entry.is_dir() and entry.name.startswith("request_"):
             cleanup_request_dir(entry)

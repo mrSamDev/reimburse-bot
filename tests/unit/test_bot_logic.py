@@ -47,6 +47,35 @@ def test_cancel_from_awaiting_password():
     s.state = BotState.AWAITING_PASSWORD
     state, reply = logic.handle_cancel(s)
     assert state == BotState.IDLE
+    assert reply == msg.CANCELLED
+
+
+def test_cancel_from_awaiting_heading():
+    s = _session_with(["f1"])
+    s.state = BotState.AWAITING_HEADING
+    state, reply = logic.handle_cancel(s)
+    assert state == BotState.IDLE
+    assert reply == msg.CANCELLED
+
+
+def test_cancel_from_collecting_is_noop():
+    # /cancel only aborts the heading/password flow; outside it, it must not
+    # silently reset a collecting session (which would leave receipts staged
+    # while the state reads idle).
+    s = _session_with(["f1"])
+    s.state = BotState.COLLECTING
+    state, reply = logic.handle_cancel(s)
+    assert state == BotState.COLLECTING
+    assert reply is None
+    assert s.receipt_file_ids == ["f1"]
+
+
+def test_cancel_from_idle_is_noop():
+    s = _session_with([])
+    s.state = BotState.IDLE
+    state, reply = logic.handle_cancel(s)
+    assert state == BotState.IDLE
+    assert reply is None
 
 
 def test_generate_no_receipts():

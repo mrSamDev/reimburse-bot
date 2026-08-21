@@ -61,6 +61,9 @@ class Config(BaseModel):
     health_enabled: bool = False
     health_port: int = 8080
     report_title: str = "Heading Travel Expenses"
+    # Deprecated: the report period is now derived from the receipts'
+    # transaction dates (see app/services/report_period.py), not read from env.
+    # Kept only so existing call sites that construct Config(report_period=...) work.
     report_period: str = ""
 
     @field_validator("ai_provider")
@@ -208,9 +211,6 @@ class Config(BaseModel):
     def _upper_log(cls, v: str) -> str:
         return (v or "INFO").strip().upper()
 
-    def requires_telegram(self) -> bool:
-        return bool(self.telegram_token)
-
     def validate_operational(self) -> Config:
         """Run checks needed before the bot can actually process receipts.
 
@@ -268,7 +268,6 @@ def _from_env() -> dict[str, Any]:
         "health_enabled": (get("HEALTH_ENABLED", "false") or "false").lower() in ("1", "true", "yes"),
         "health_port": int(get("HEALTH_PORT", "8080")),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
-        "report_period": get("REPORT_PERIOD", ""),
     }
 
 

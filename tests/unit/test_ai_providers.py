@@ -123,6 +123,46 @@ def test_ollama_provider_uses_openai_compatible_client(monkeypatch, tmp_path):
     assert result.total == 73
 
 
+def test_ollama_provider_disables_sdk_retries(monkeypatch):
+    """OllamaProvider must set max_retries=0 so the openai SDK's default 2
+    retries do not stack on top of the app's own retry loop (up to 6
+    uncontrolled attempts). Mirrors OpenAIProvider."""
+    import openai
+
+    captured = {}
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return _FakeClient([_FakeCompletion('{"merchant_name":"Bolt","total":73}')])
+
+    monkeypatch.setattr(openai, "OpenAI", fake_openai)
+    OllamaProvider(_cfg_ollama())
+    assert captured.get("max_retries") == 0
+
+
+def test_ollama_provider_maps_rate_limit(monkeypatch, tmp_path):
+    """An HTTP 429 from Ollama must surface as AIRateLimitError with the
+    parsed Retry-After and error kind, so the shared rate-limit backoff path
+    applies (mirrors OpenAIProvider)."""
+    import httpx
+    import openai
+
+    from app.ai.base import AIRateLimitError
+
+    img = make_image(tmp_path / "r.jpg", "JPEG")
+    resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+    resp.headers["retry-after"] = "0.5"
+    err = openai.RateLimitError("rate limited", response=resp, body=None)
+    err.type = "rate_limit_exceeded"
+
+    provider = OllamaProvider(_cfg_ollama())
+    provider._client = _FakeClient([err])
+    with pytest.raises(AIRateLimitError) as excinfo:
+        provider.extract_receipt(img)
+    assert excinfo.value.retry_after == 0.5
+    assert excinfo.value.kind == "rate_limit_exceeded"
+
+
 def _make_openai():
     return _cfg_openai()
 

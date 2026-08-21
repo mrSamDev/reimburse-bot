@@ -142,6 +142,12 @@ class Batch(BaseModel):
 
     @property
     def total(self) -> Decimal:
+        """Raw sum across ALL receipts, regardless of currency.
+
+        Warning: this mixes currencies (e.g. AED + USD) and is a footgun. It is
+        retained only for tests/snapshots. Production totals must use
+        :meth:`currency_totals` (per-currency), never this property.
+        """
         return sum((r.total for r in self.receipts), Decimal("0"))
 
     def currencies(self) -> list[str]:
