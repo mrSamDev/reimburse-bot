@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
@@ -24,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _maintenance_loop(
-    sweeper, interval_seconds: float, evict_idle=None
+    sweeper,
+    interval_seconds: float,
+    evict_idle=None,
+    lock_idle_seconds: float = 0.0,
 ) -> None:
     """Periodically run the session maintenance sweep (reclaim + purge) and
     evict idle per-user locks so their memory does not grow unboundedly."""
@@ -43,7 +48,7 @@ async def _maintenance_loop(
             logger.exception("maintenance sweep failed")
         if evict_idle is not None:
             try:
-                evicted = evict_idle()
+                evicted = evict_idle(lock_idle_seconds)
                 if evicted:
                     logger.info("evicted %d idle user locks", evicted)
             except Exception:
@@ -51,7 +56,10 @@ async def _maintenance_loop(
 
 
 def _make_post_init(
-    sessions: SessionStore, interval_seconds: float, locks=None
+    sessions: SessionStore,
+    interval_seconds: float,
+    locks=None,
+    lock_idle_seconds: float = 0.0,
 ):
     """Return a ``post_init`` that starts the maintenance task and tracks it.
 
@@ -75,7 +83,12 @@ def _make_post_init(
     async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
         holder["task"] = asyncio.get_running_loop().create_task(
-            _maintenance_loop(sessions.sweep, interval_seconds, evict_idle)
+            _maintenance_loop(
+                sessions.sweep,
+                interval_seconds,
+                evict_idle,
+                lock_idle_seconds,
+            )
         )
 
     return _post_init
@@ -126,7 +139,10 @@ def build_application(
     # Start the background maintenance loop (session sweep + idle-lock eviction)
     # in ``post_init``, using the same sessions + bot locks this app owns.
     app.post_init = _make_post_init(
-        sessions, config.maintenance_interval_seconds, bot.locks
+        sessions,
+        config.maintenance_interval_seconds,
+        bot.locks,
+        config.session_lease_ttl_seconds,
     )
     return app
 
@@ -152,6 +168,24 @@ def main() -> None:
         raise SystemExit(f"Configuration error: {exc}") from exc
     except ValueError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
+
+    # Resolve dirs to absolute paths and ensure they exist and are writable
+    # before polling. Failing here gives a clear message instead of an opaque
+    # PermissionError mid-request, and makes the app self-healing when an image
+    # does not pre-create the dirs (e.g. a root-owned /app/temp default).
+    config.temp_dir = Path(config.temp_dir).resolve()
+    config.data_dir = Path(config.data_dir).resolve()
+    config.backup_dir = Path(config.backup_dir).resolve()
+    for d in (config.temp_dir, config.data_dir, config.backup_dir):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            if not os.access(d, os.W_OK):
+                raise SystemExit(f"Directory not writable: {d}")
+        except PermissionError as exc:
+            raise SystemExit(
+                f"Cannot create/write directory {d}: {exc}. "
+                "Check the runtime user owns the mount (TEMP_DIR/DATA_DIR/BACKUP_DIR)."
+            ) from exc
 
     # A hard kill (SIGKILL/OOM) can leave orphaned request dirs behind from a
     # previous run; sweep them before polling so the temp filesystem never fills.
