@@ -3,6 +3,8 @@
 import sqlite3
 from decimal import Decimal
 
+import pytest
+
 from app.services.ledger_service import ReceiptLedger
 
 
@@ -162,6 +164,27 @@ def test_by_user_returns_only_that_users_rows(tmp_path):
     assert len(lg.by_user(1)) == 1
     assert lg.by_user(1)[0]["file_id"] == "f1"
     assert lg.by_user(99) == []
+
+
+def test_ledger_backup_produces_valid_copy(tmp_path):
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1"))
+    lg.insert_failure("f2", "bad", request_id="r1", user_id=1)
+    bak_dir = tmp_path / "backups"
+    dst = lg.backup(bak_dir)
+    assert dst.exists()
+    conn = sqlite3.connect(str(dst))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_ledger_backup_missing_source_raises(tmp_path):
+    from app.services.backup_service import backup_database
+
+    with pytest.raises(FileNotFoundError):
+        backup_database(tmp_path / "missing.db", tmp_path / "backups")
 
 
 def test_ledger_write_waits_under_contention(tmp_path):

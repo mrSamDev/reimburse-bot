@@ -41,6 +41,7 @@ class Config(BaseModel):
     max_file_size_mb: int = 10
     temp_dir: Path = PROJECT_ROOT / "temp"
     data_dir: Path = PROJECT_ROOT / "data"
+    backup_dir: Path = PROJECT_ROOT / "backups"
     ai_timeout_seconds: int = 60
     ai_retry_attempts: int = 3
     ai_retry_base_delay: float = 1.0
@@ -137,11 +138,14 @@ class Config(BaseModel):
             raise ValueError("max_processing_seconds must be >= 0")
         return v
 
-    @field_validator("temp_dir", "data_dir", mode="before")
+    @field_validator("temp_dir", "data_dir", "backup_dir", mode="before")
     @classmethod
     def _coerce_path(cls, v: Any, info: Any) -> Path:
         if v is None or v == "":
-            default = PROJECT_ROOT / ("data" if info.field_name == "data_dir" else "temp")
+            default = PROJECT_ROOT / {
+                "data_dir": "data",
+                "backup_dir": "backups",
+            }.get(info.field_name, "temp")
             return Path(default)
         return Path(v)
 
@@ -195,6 +199,7 @@ def _from_env() -> dict[str, Any]:
         "max_file_size_mb": int(get("MAX_FILE_SIZE_MB", "10")),
         "temp_dir": Path(get("TEMP_DIR", str(PROJECT_ROOT / "temp"))),
         "data_dir": Path(get("DATA_DIR", str(PROJECT_ROOT / "data"))),
+        "backup_dir": Path(get("BACKUP_DIR", str(PROJECT_ROOT / "backups"))),
         "ai_timeout_seconds": int(get("AI_TIMEOUT_SECONDS", "60")),
         "ai_retry_attempts": int(get("AI_RETRY_ATTEMPTS", "3")),
         "ai_retry_base_delay": float(get("AI_RETRY_BASE_DELAY", "1.0")),

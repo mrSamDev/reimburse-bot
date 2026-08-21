@@ -21,6 +21,10 @@ temp/*
 data/*
 !data/.gitkeep
 
+# Runtime database backups
+backups/*
+!backups/.gitkeep
+
 # Local OS noise
 .DS_Store
 

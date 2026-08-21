@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from app.services.backup_service import backup_database
+
 _SCHEMA_VERSION = 2
 
 # Ordered migrations keyed by target schema version.
@@ -166,6 +168,10 @@ class ReceiptLedger:
             return cur.rowcount
         finally:
             conn.close()
+
+    def backup(self, target_dir: str | Path) -> Path:
+        """Write a durable copy of the audit ledger DB into ``target_dir``."""
+        return backup_database(self._db_path, target_dir, label="receipts")
 
     def summary(self) -> dict[str, int]:
         """Aggregate counts for a period-less reconciliation."""

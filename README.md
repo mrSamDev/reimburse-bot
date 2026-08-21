@@ -68,6 +68,7 @@ python -m app.main         # start long polling
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `AI_PER_RECEIPT_TIMEOUT_SECONDS` | Hard per-receipt processing timeout (default 120) |
 | `LOG_FORMAT` | `text` or `json` structured logs (default `text`) |
+| `BACKUP_DIR` | Directory for durable DB backups (default `backups/`) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
 
 ## Commands
@@ -126,6 +127,17 @@ tests/
   unit/             per-module tests
   integration/      pipeline, telegram flow, reference-output tests
   fixtures/         images, ai responses, reference dataset
+```
+
+## Backups & restore
+
+The state (`data/sessions.db`) and audit (`data/receipts.db`) databases are backed
+up to `backups/` at startup via the SQLite online-backup API. To restore from a
+backup, stop the bot, copy a `*_sessions_*.db` / `*_receipts_*.db` file over the
+live database, and start it again:
+
+```bash
+cp backups/receipts_receipts_20240101_120000.db data/receipts.db
 ```
 
 ## Production checklist

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app.bot.states import BotState
 from app.models.session import Session
+from app.services.backup_service import backup_database
 
 _SCHEMA_VERSION = 2
 
@@ -252,6 +253,10 @@ class SessionStore:
             return bool(row and row["processing"])
         finally:
             conn.close()
+
+    def backup(self, target_dir: str | Path) -> Path:
+        """Write a durable copy of the sessions DB into ``target_dir``."""
+        return backup_database(self._db_path, target_dir, label="sessions")
 
     async def count(self) -> int:
         conn = self._connect()

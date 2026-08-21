@@ -21,7 +21,11 @@ from app.services.telegram_service import TelegramService
 logger = logging.getLogger(__name__)
 
 
-def build_application(config: Config, sessions: SessionStore | None = None) -> Application:
+def build_application(
+    config: Config,
+    sessions: SessionStore | None = None,
+    ledger: ReceiptLedger | None = None,
+) -> Application:
     """Assemble the PTB application from a validated config."""
     security = SecurityService(config)
     if sessions is None:
@@ -30,6 +34,8 @@ def build_application(config: Config, sessions: SessionStore | None = None) -> A
             ttl_seconds=config.session_ttl_seconds,
             lease_ttl_seconds=config.session_lease_ttl_seconds,
         )
+    if ledger is None:
+        ledger = ReceiptLedger(config.data_dir / "receipts.db")
 
     application = (
         ApplicationBuilder()
@@ -46,7 +52,6 @@ def build_application(config: Config, sessions: SessionStore | None = None) -> A
         max_file_size_mb=config.max_file_size_mb,
     )
     provider_impl = build_provider(config)
-    ledger = ReceiptLedger(config.data_dir / "receipts.db")
     processing = ProcessingService(config, provider_impl, telegram, ledger=ledger)
     bot = ReimbursementBot(config, security, sessions, telegram, provider_impl, processing)
 
@@ -90,7 +95,16 @@ def main() -> None:
     if purged:
         logger.warning("purged %d expired sessions", purged)
 
-    application = build_application(config, sessions=sessions)
+    # Durable backup of the audit + session DBs before we start serving.
+    ledger = ReceiptLedger(config.data_dir / "receipts.db")
+    try:
+        ledger.backup(config.backup_dir)
+        sessions.backup(config.backup_dir)
+        logger.info("backed up state DBs to %s", config.backup_dir)
+    except FileNotFoundError as exc:
+        logger.warning("backup skipped: %s", exc)
+
+    application = build_application(config, sessions=sessions, ledger=ledger)
     application.run_polling(drop_pending_updates=True)
 
 

@@ -245,6 +245,22 @@ async def test_purge_expired_clears_stale_processing(tmp_path):
     assert await store.try_acquire_processing(1) is True
 
 
+async def test_session_backup_produces_valid_copy(tmp_path):
+    import sqlite3
+
+    store = _store(tmp_path)
+    s = await store.get(5)
+    s.add_file_id("f1")
+    await store.save(s)
+    dst = store.backup(tmp_path / "backups")
+    assert dst.exists()
+    conn = sqlite3.connect(str(dst))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 async def test_write_waits_under_contention_not_locked_error(tmp_path):
     # A write against a held SQLite lock must wait (busy_timeout), not fail with
     # "database is locked".
