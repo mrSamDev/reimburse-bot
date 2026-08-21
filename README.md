@@ -191,3 +191,9 @@ This model is fine for two people who trust each other; it is **not** a hardened
 - `BOT_PASSWORD` is set and strong.
 - Secrets live only in `.env`, never in Git, the image, or logs.
 - The report PDF embeds the original receipt image per row, preserves aspect ratio, breaks across pages, and ends with a `Decimal`-computed total.
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+> Personal tool shared as a reference implementation. This bot is not a hardened multi-tenant credential system; run it only for people you trust (see [Security model](#security-model--known-limitations)).

@@ -32,4 +32,3 @@ backups/*
 dist/
 build/
 *.pdf
-!reference_report.pdf
