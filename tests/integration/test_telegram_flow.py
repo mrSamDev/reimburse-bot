@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from app.ai.base import ReceiptExtraction
+from app.ai.base import AIProviderError, ReceiptExtraction
 from app.bot.bot import ReimbursementBot
 from app.bot.states import BotState
 from app.config import Config
@@ -199,6 +199,42 @@ async def test_duplicate_receipt_not_staged(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f1"), None)
     assert sessions.get(111).receipt_file_ids == ["f1"]
+
+
+async def test_report_caption_surfaces_failed_receipts(tmp_path):
+    class _FailOnceProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def extract_receipt(self, image_path):
+            self.calls += 1
+            if self.calls <= 3:  # f1 fails all retry attempts
+                raise AIProviderError("provider error")
+            return ReceiptExtraction(merchant_name="Ride with Sazzad", total="53.50", confidence=0.95)
+
+    config = Config(
+        telegram_token="t", allowed_user_ids="111", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_retry_base_delay=0,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = FakeTransport()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore()
+    provider = _FailOnceProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.message_handler(_photo_update("f2"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("secret"), None)
+
+    assert transport.sent_docs
+    assert "Could not process 1 receipt(s)" in transport.sent_docs[-1]
+    assert "Receipts: 1" in transport.sent_docs[-1]
 
 
 async def test_catch_all_error_log_carries_request_id(tmp_path):

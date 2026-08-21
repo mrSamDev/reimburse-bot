@@ -7,7 +7,7 @@ import logging
 import random
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +46,7 @@ class ProcessingResult:
     processed_count: int = 0
     failed_count: int = 0
     review_count: int = 0
+    receipt_failures: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -137,6 +138,7 @@ class ProcessingService:
         user_id: int,
         file_ids: list[str],
         request_base: Path | None = None,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> ProcessingResult:
         if not file_ids:
             raise ProcessingError("No receipts to process")
@@ -156,6 +158,7 @@ class ProcessingService:
         batch = Batch()
         image_map: dict[str, str] = {}
         failed = 0
+        receipt_failures: list[dict] = []
 
         with request_scope(request_id):
             logger.info(
@@ -177,24 +180,27 @@ class ProcessingService:
                     outcome = await self._process_one(file_id, idx, input_dir, normalized_dir)
                     if outcome.failed:
                         failed += 1
+                        receipt_failures.append({"file_id": file_id, "reason": outcome.reason})
                         logger.info("receipt failed: %s", outcome.reason)
-                        continue
-                    receipt = outcome.receipt
-                    if receipt is None:
-                        # Defensive: a successful outcome should always carry a receipt.
-                        failed += 1
-                        continue
-                    batch.add(receipt)
-                    image_map[receipt.source_file_id] = str(
-                        normalized_dir / f"receipt_{idx:03d}.jpg"
-                    )
-                    if self._ledger is not None:
-                        # Audit the accepted receipt immediately (idempotent by
-                        # file_id) so a later PDF failure still leaves a trail.
-                        await asyncio.to_thread(
-                            self._ledger.insert,
-                            self._to_entry(receipt, request_id, user_id),
-                        )
+                    else:
+                        receipt = outcome.receipt
+                        if receipt is None:
+                            # Defensive: a successful outcome should carry a receipt.
+                            failed += 1
+                        else:
+                            batch.add(receipt)
+                            image_map[receipt.source_file_id] = str(
+                                normalized_dir / f"receipt_{idx:03d}.jpg"
+                            )
+                            if self._ledger is not None:
+                                # Audit the accepted receipt immediately (idempotent
+                                # by file_id) so a later PDF failure still leaves a trail.
+                                await asyncio.to_thread(
+                                    self._ledger.insert,
+                                    self._to_entry(receipt, request_id, user_id),
+                                )
+                    if on_progress is not None:
+                        await on_progress(idx + 1, len(file_ids))
 
                 if not batch.receipts:
                     raise ProcessingError(
@@ -231,6 +237,7 @@ class ProcessingService:
                 processed_count=len(batch.receipts),
                 failed_count=failed,
                 review_count=batch.review_count,
+                receipt_failures=receipt_failures,
             )
 
     async def _process_one(
@@ -270,6 +277,7 @@ async def run_with_cleanup(
     temp_root: str | Path,
     deliver=None,
     request_id: str | None = None,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> ProcessingResult:
     """Run processing, deliver the report, then guarantee cleanup.
 
@@ -277,11 +285,14 @@ async def run_with_cleanup(
     the PDF still exists, so the bot can send it to Telegram before the request
     directory is removed. ``request_id`` lets a caller correlate logs emitted
     across the whole generation (including its own error handling) to one id.
+    ``on_progress`` is an optional ``(done, total)`` callback invoked per receipt.
     """
     request_id = request_id or uuid.uuid4().hex[:6]
     base = make_request_base(temp_root, request_id)
     try:
-        result = await service.process(user_id, file_ids, request_base=base)
+        result = await service.process(
+            user_id, file_ids, request_base=base, on_progress=on_progress
+        )
         if deliver is not None:
             await deliver(result)
         return result

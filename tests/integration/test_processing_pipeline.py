@@ -222,6 +222,34 @@ async def test_batch_budget_zero_disables_limit(tmp_path):
     assert result.processed_count == 1
 
 
+async def test_on_progress_callback_receives_events(tmp_path):
+    cfg = _config(tmp_path)
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10"), _ext("B", "20")]), FakeTelegram())
+    events = []
+
+    async def progress(done, total):
+        events.append((done, total))
+
+    result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir, on_progress=progress)
+    assert events == [(1, 2), (2, 2)]
+    assert result.processed_count == 2
+
+
+async def test_receipt_failures_collected(tmp_path):
+    cfg = _config(tmp_path)
+    # f1 fails every retry attempt; f2 succeeds.
+    svc = ProcessingService(
+        cfg,
+        FakeProvider([AIProviderError("AI error")] * 3 + [_ext("ok", "10")]),
+        FakeTelegram(),
+    )
+    result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    assert result.failed_count == 1
+    assert len(result.receipt_failures) == 1
+    assert result.receipt_failures[0]["file_id"] == "f1"
+    assert result.receipt_failures[0]["reason"]
+
+
 async def test_ledger_persists_accepted_receipt(tmp_path):
     cfg = _config(tmp_path)
     ledger = ReceiptLedger(tmp_path / "ledger.db")

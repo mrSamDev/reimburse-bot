@@ -245,12 +245,18 @@ class ReimbursementBot:
             f"{c} Total: {_fmt(result.batch.currency_totals[c])}"
             for c in result.batch.currencies()
         )
-        return msg.REPORT_READY.format(
+        caption = msg.REPORT_READY.format(
             receipts=len(result.batch.receipts),
             processed=result.processed_count,
             review=result.review_count,
             totals=totals,
         )
+        failures = getattr(result, "receipt_failures", None) or []
+        if failures:
+            reasons = "; ".join(f["reason"] for f in failures)
+            caption += f"\n\nCould not process {len(failures)} receipt(s): {reasons}"
+        return caption
+
 
     async def _reply(self, update, text: str) -> None:
         if not text:
