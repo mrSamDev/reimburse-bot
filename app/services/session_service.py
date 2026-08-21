@@ -53,7 +53,10 @@ class SessionStore:
 
     # ---- connection / schema -------------------------------------------
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        # Explicit busy timeout (10s): a write must wait for the lock rather than
+        # fail with "database is locked" under concurrent instances.
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
+        conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         return conn

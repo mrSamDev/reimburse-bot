@@ -190,3 +190,40 @@ async def test_purge_expired_clears_stale_processing(tmp_path):
     assert removed == 1
     # After a crash, a fresh instance can re-acquire the slot.
     assert await store.try_acquire_processing(1) is True
+
+
+async def test_write_waits_under_contention_not_locked_error(tmp_path):
+    # A write against a held SQLite lock must wait (busy_timeout), not fail with
+    # "database is locked".
+    import asyncio
+    import sqlite3
+    import threading
+    import time
+
+    store = _store(tmp_path)
+    await store.save(await store.get(1))  # ensure a row
+    blocker = sqlite3.connect(str(_db(tmp_path)))
+    blocker.execute("BEGIN IMMEDIATE")
+    errors = []
+
+    async def do_write():
+        s = await store.get(1)
+        s.chat_id = 123
+        await store.save(s)
+
+    def worker():
+        try:
+            asyncio.run(do_write())
+        except sqlite3.OperationalError as exc:
+            errors.append(str(exc))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(0.05)  # let the write hit the lock
+    blocker.rollback()  # release the write lock -> waiting writer proceeds
+    blocker.close()
+    t.join(timeout=5)
+    assert errors == []
+    assert (await store.get(1)).chat_id == 123
+
+

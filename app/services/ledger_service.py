@@ -88,7 +88,10 @@ class ReceiptLedger:
             conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        # Explicit busy timeout (10s) so writes wait out lock contention rather
+        # than failing with "database is locked" under concurrent instances.
+        conn = sqlite3.connect(str(self._db_path), timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 

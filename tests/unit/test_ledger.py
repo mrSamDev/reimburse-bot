@@ -164,6 +164,35 @@ def test_by_user_returns_only_that_users_rows(tmp_path):
     assert lg.by_user(99) == []
 
 
+def test_ledger_write_waits_under_contention(tmp_path):
+    # A ledger write against a held SQLite lock must wait (busy_timeout), not
+    # fail immediately with "database is locked".
+    import sqlite3
+    import threading
+    import time
+
+    db = tmp_path / "ledger.db"
+    lg = ReceiptLedger(db)
+    blocker = sqlite3.connect(str(db))
+    blocker.execute("BEGIN IMMEDIATE")
+    errors = []
+
+    def do_insert():
+        try:
+            lg.insert(_entry("f1"))
+        except sqlite3.OperationalError as exc:
+            errors.append(str(exc))
+
+    t = threading.Thread(target=do_insert)
+    t.start()
+    time.sleep(0.05)  # let the insert hit the lock
+    blocker.rollback()  # release the write lock -> waiting writer proceeds
+    blocker.close()
+    t.join(timeout=5)
+    assert errors == []
+    assert lg.count() == 1
+
+
 def test_mark_delivered_sets_delivered_at(tmp_path):
     lg = ReceiptLedger(tmp_path / "ledger.db")
     lg.insert(_entry("f1", request_id="r1"))
