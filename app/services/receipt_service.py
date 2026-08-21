@@ -20,7 +20,7 @@ from app.services.cleanup_service import cleanup_request_dir
 from app.services.ledger_service import ReceiptLedger
 from app.services.pdf_service import generate_report
 from app.services.telegram_service import TelegramService
-from app.utils import images
+from app.utils import images, metrics
 from app.utils.logging import request_scope
 
 logger = logging.getLogger(__name__)
@@ -87,9 +87,11 @@ async def _extract_with_retry(
     ``_sleep``/``_random`` are injectable for deterministic tests.
     """
     for attempt in range(max_attempts):
+        metrics.inc("ai_calls")
         try:
             return await asyncio.to_thread(provider.extract_receipt, image_path)
         except AIProviderError:
+            metrics.inc("ai_errors")
             if attempt == max_attempts - 1:
                 raise
             # Full jitter: sleep in [0, base_delay * (attempt+1)].
@@ -210,6 +212,7 @@ class ProcessingService:
                     _check_deadline()
                     if outcome.failed:
                         failed += 1
+                        metrics.inc("failed")
                         receipt_failures.append({"file_id": file_id, "reason": outcome.reason})
                         logger.info("receipt failed: %s", outcome.reason)
                         if self._ledger is not None:
@@ -225,8 +228,12 @@ class ProcessingService:
                         if receipt is None:
                             # Defensive: a successful outcome should carry a receipt.
                             failed += 1
+                            metrics.inc("failed")
                         else:
                             batch.add(receipt)
+                            metrics.inc("processed")
+                            if receipt.review_required:
+                                metrics.inc("review")
                             image_map[receipt.source_file_id] = str(
                                 normalized_dir / f"receipt_{idx:03d}.jpg"
                             )

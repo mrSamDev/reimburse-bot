@@ -361,3 +361,15 @@ async def test_ledger_records_multiple_receipts(tmp_path):
     await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
     assert ledger.count() == 2
     assert ledger.all()[1]["total"] == Decimal("20")
+
+
+async def test_pipeline_increments_metrics(tmp_path):
+    from app.utils import metrics
+
+    metrics.reset_metrics()
+    cfg = _config(tmp_path)
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10")]), FakeTelegram())
+    await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+    m = metrics.get_metrics()
+    assert m["processed"] == 1
+    assert m["ai_calls"] >= 1

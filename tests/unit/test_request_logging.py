@@ -1,8 +1,9 @@
 """Tests for request_id correlation in logs."""
 
+import json
 import logging
 
-from app.utils.logging import RedactingFilter, RequestIdFormatter, request_scope
+from app.utils.logging import JSONFormatter, RedactingFilter, RequestIdFormatter, request_scope
 
 
 class _Capture(logging.Handler):
@@ -71,3 +72,36 @@ def test_nested_scopes_inner_wins_then_restores():
         lg.warning("outer")
     assert "request_id=inner" in h.messages[0]
     assert "request_id=outer" in h.messages[1]
+
+
+def _json_capture():
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.setFormatter(JSONFormatter())
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append(self.format(record))
+
+    h = _Capture()
+    lg = logging.getLogger("test.json")
+    lg.addHandler(h)
+    lg.propagate = False
+    return lg, h
+
+
+def test_json_formatter_includes_request_id_when_in_scope():
+    lg, h = _json_capture()
+    with request_scope("rid99"):
+        lg.warning("processing receipt")
+    obj = json.loads(h.lines[0])
+    assert obj["request_id"] == "rid99"
+    assert obj["message"] == "processing receipt"
+    assert obj["level"] == "WARNING"
+
+
+def test_json_formatter_request_id_none_outside_scope():
+    lg, h = _json_capture()
+    lg.warning("no scope")
+    assert json.loads(h.lines[0])["request_id"] is None

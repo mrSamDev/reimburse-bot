@@ -51,6 +51,7 @@ class Config(BaseModel):
     session_ttl_seconds: int = 1800
     session_lease_ttl_seconds: int = 120
     log_level: str = "INFO"
+    log_format: str = "text"
     report_title: str = "Heading Travel Expenses"
     report_period: str = ""
 
@@ -112,6 +113,14 @@ class Config(BaseModel):
     def _check_lease_ttl(cls, v: int) -> int:
         if v < 1:
             raise ValueError("session_lease_ttl_seconds must be >= 1")
+        return v
+
+    @field_validator("log_format")
+    @classmethod
+    def _check_log_format(cls, v: str) -> str:
+        v = (v or "text").strip().lower()
+        if v not in {"text", "json"}:
+            raise ValueError("log_format must be 'text' or 'json'")
         return v
 
     @field_validator("ai_per_receipt_timeout_seconds")
@@ -196,6 +205,7 @@ def _from_env() -> dict[str, Any]:
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
         "session_lease_ttl_seconds": int(get("SESSION_LEASE_TTL_SECONDS", "120")),
         "log_level": get("LOG_LEVEL", "INFO"),
+        "log_format": get("LOG_FORMAT", "text"),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
         "report_period": get("REPORT_PERIOD", ""),
     }

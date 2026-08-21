@@ -29,6 +29,7 @@ from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
 from app.services.telegram_service import TelegramService
 from app.utils import files as file_utils
+from app.utils import metrics
 from app.utils.logging import configure_logging, request_scope
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class ReimbursementBot:
         self.telegram = telegram
         self.processing = processing
         self.locks = UserLockManager()
-        configure_logging(config.log_level)
+        configure_logging(config.log_level, config.log_format)
 
     # ---- guards -----------------------------------------------------------
     def _authorized(self, update):
@@ -222,6 +223,7 @@ class ReimbursementBot:
                             session.chat_id, result.out_pdf_path, caption=caption
                         )
                         await self.processing.mark_delivered(request_id)
+                        metrics.inc("delivered")
 
                     await run_with_cleanup(
                         self.processing,

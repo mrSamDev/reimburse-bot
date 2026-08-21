@@ -37,6 +37,27 @@ class RequestIdFormatter(logging.Formatter):
         return msg
 
 
+class JSONFormatter(logging.Formatter):
+    """Structured JSON log line, carrying ``request_id`` when in scope."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+
+        data: dict = {
+            "ts": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": _request_id.get() or None,
+        }
+        exc_text = getattr(record, "exc_text", None)
+        if record.exc_info and not exc_text:
+            exc_text = self.formatException(record.exc_info)
+        if exc_text:
+            data["exception"] = exc_text
+        return json.dumps(data)
+
+
 _SENSITIVE_PATTERNS = [
     re.compile(r"openai_api_key[=:]?\s*[\w-]{8,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]+"),
@@ -72,16 +93,27 @@ class RedactingFilter(logging.Filter):
         return True
 
 
-def configure_logging(level: str = "INFO") -> None:
+def configure_logging(level: str = "INFO", log_format: str = "text") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    formatter: logging.Formatter
+    if log_format == "json":
+        formatter = JSONFormatter()
+    else:
+        formatter = RequestIdFormatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"
+        )
     if not root.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(
-            RequestIdFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
+        handler.setFormatter(formatter)
         handler.addFilter(RedactingFilter())
         root.addHandler(handler)
+    else:
+        # Replace the formatter on existing handlers so log_format takes effect
+        # even when configure_logging is called more than once.
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.setFormatter(formatter)
     # Ensure the redacting filter is on all handlers.
     for h in root.handlers:
         if not any(isinstance(f, RedactingFilter) for f in h.filters):
