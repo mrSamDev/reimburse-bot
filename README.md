@@ -166,8 +166,24 @@ cp backups/receipts_receipts_20240101_120000.db data/receipts.db
 ## Health & metrics
 
 With `HEALTH_ENABLED=true`, a zero-dependency HTTP server serves:
-- `GET /health` → `{"status":"ok"}`
-- `GET /metrics` → JSON of the in-process counters (`processed`, `review`, `failed`, `delivered`, `ai_calls`, `ai_errors`)
+- `GET /health` → `{"status":"ok"}` — always open (liveness probe)
+- `GET /metrics` → JSON of the in-process counters + durations (`processed`, `review`, `failed`, `delivered`, `ai_calls`, `ai_errors`, `receipt_processing_seconds_count/sum`, `batch_processing_seconds_count/sum`, and the failure classes `timeout`/`validation_error`/`ai_error`/`unexpected`)
+
+If `HEALTH_TOKEN` is set, `GET /metrics` requires `Authorization: Bearer <token>`; `/health` stays open. The server binds `0.0.0.0` over plain HTTP — keep the port behind your firewall.
+
+> Metrics are held in-process and **reset on restart**, so they describe the current run, not history.
+
+## Security model & known limitations
+
+This is a small, private bot, not a general-purpose auth system. Be aware of what it does and does not protect:
+
+- **Authorization** is a static allowlist (`ALLOWED_USER_IDS`); everyone else is default-denied.
+- **The report password is a single shared plaintext secret** sent by the user through the Telegram chat (whose history is retained). `BOT_PASSWORD` is stored in plaintext in the env/config. A wrong password is throttled per user (`PASSWORD_MAX_ATTEMPTS` / `PASSWORD_LOCKOUT_SECONDS`), but the throttle is **in-memory and resets on restart**, and the secret itself is still a shared, chat-transported value — not a per-user credential.
+- **Receipts stay in Telegram** until `/generate`; the server only holds `file_id`s in SQLite. Images are downloaded transiently to a tmpfs and deleted after processing.
+- The health/metrics server (if enabled) is unauthenticated on `/health` and token-gated on `/metrics`, over plaintext HTTP on `0.0.0.0`.
+- AI-extracted receipt data is validated before use, but the report **period subtitle is derived from AI-extracted transaction dates** and trusts them only when extraction confidence is high.
+
+This model is fine for two people who trust each other; it is **not** a hardened multi-tenant credential system.
 
 ## Production checklist
 
