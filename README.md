@@ -1,26 +1,18 @@
 # Reimbursement Bot
 
-A private, password-protected Telegram bot that collects receipt photos and
-generates a PDF reimbursement report via a vision AI provider.
+A private, password-protected Telegram bot that collects receipt photos and turns them into a PDF reimbursement report through a vision AI provider.
 
-## Key design points
+## How it works
 
-- **Receipts stay in Telegram.** Only Telegram `file_id` values are held in
-  staging sessions. Files are downloaded only after `/generate` + correct
-  password.
-- **AI owns extraction, the app owns arithmetic.** All totals are computed with
-  Python `Decimal`. AI output is validated (Pydantic schema + business rules)
-  before use, and never passed raw to the PDF layer.
-- **Temporary, request-scoped storage.** Images, normalized images and the PDF
-  live under `temp/request_<id>/` and are deleted in a `finally` block even on
-  failure (and orphans from a crash are swept at startup).
-- **Durable state layer.** Per-user staging sessions and the cross-process
-  per-user processing lease live in SQLite (`data/sessions.db`, WAL), so state
-  survives restarts and generation is serialized across instances. Stale
-  sessions and crashed leases are purged at startup.
-- **Durable audit ledger.** Every accepted and failed receipt is recorded in
-  SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with
-  delivery outcome, so reimbursements have a persistent trail across restarts.
+Receipts never leave Telegram until you ask for a report. The bot holds only each photo's `file_id` in a staging session, and downloads nothing until `/generate` plus the correct password. That's the whole trust model, so we don't need a public URL, port forwarding, or ngrok. It long-polls Telegram's API outbound and stays quietly behind your firewall. Details live in [`docs/telegram-connection.md`](docs/telegram-connection.md).
+
+The AI does the reading, but the app owns the arithmetic. Every total is computed with Python `Decimal`, and AI output passes a Pydantic schema plus business rules before it's trusted. Raw model output never reaches the PDF layer.
+
+Storage is temporary and request-scoped. Images and the PDF sit under `temp/request_<id>/` and get deleted in a `finally` block even when something fails, while a startup sweep clears orphans left by a crash.
+
+State is durable. Per-user staging sessions and the cross-process per-user lease live in SQLite (`data/sessions.db`, WAL mode), so restarts don't lose anything and generation stays serialized across instances. A background sweep reclaims stale sessions and crashed leases.
+
+There's also an audit ledger. Every accepted and failed receipt lands in SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with the delivery outcome recorded. Reimbursements keep a persistent trail no matter how often the bot restarts.
 
 ## Requirements
 
@@ -28,12 +20,6 @@ generates a PDF reimbursement report via a vision AI provider.
 - A Telegram bot token (via @BotFather)
 - An OpenAI API key **or** an Ollama (vision) endpoint
 - An allowance list of numeric Telegram user IDs
-
-## How it connects to Telegram
-
-The bot uses **long polling** — it connects *out* to Telegram's API, so it needs
-no public URL, no port forwarding, and **no ngrok**. Read
-[`docs/telegram-connection.md`](docs/telegram-connection.md) for the details.
 
 ## Setup
 
@@ -65,7 +51,7 @@ python -m app.main         # start long polling
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `AI_REQUEST_DELAY_SECONDS` | Pause between consecutive receipts; 0 disables (default 1.0) |
-| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1 — one at a time) |
+| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1, one at a time) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 600) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |
@@ -93,13 +79,7 @@ Send a photo or a JPEG/PNG/WEBP image document to stage a receipt.
 
 ## Docker (VPS deployment)
 
-The image is built **without a Dockerfile** using [nixpacks](https://nixpacks.com)
-(the build plan lives in `nixpacks.toml`: pinned Python 3.12, hash-pinned
-`requirements.lock`, correct entrypoint). The container runs as a **non-root**
-user (uid 1000) with a tmpfs for temporary files. Secrets are injected at
-runtime via `.env` and are never baked into the image. Durable state
-(`receipts.db`, `sessions.db`, and their backups) is persisted in named Docker
-volumes (`data`, `backups`) so it survives container restarts/rebuilds.
+Nixpacks builds the image; the plan lives in `nixpacks.toml` with pinned Python 3.12, hash-pinned `requirements.lock`, and the correct entrypoint. The container runs as a non-root user (uid 1000) on a tmpfs for temporary files. Secrets come in at runtime via `.env` and never get baked into the image. Durable state (`receipts.db`, `sessions.db`, plus their backups) lives in named Docker volumes, so it survives rebuilds.
 
 ### Deploy on a VPS
 
@@ -111,10 +91,10 @@ volumes (`data`, `backups`) so it survives container restarts/rebuilds.
 2. Create your secrets file from the template (never commit it):
    ```bash
    cp .env.example .env
-   # edit .env — set TELEGRAM_TOKEN, ALLOWED_USER_IDS, ALLOWED_CHAT_IDS,
+   # edit .env, set TELEGRAM_TOKEN, ALLOWED_USER_IDS, ALLOWED_CHAT_IDS,
    # BOT_PASSWORD, and the AI provider settings (OPENAI_API_KEY or OLLAMA_*)
    ```
-3. One-shot build + start (runs `nixpacks build` then `docker compose up`):
+3. Build and start in one shot (runs `nixpacks build` then `docker compose up`):
    ```bash
    ./deploy.sh
    ```
@@ -123,7 +103,7 @@ volumes (`data`, `backups`) so it survives container restarts/rebuilds.
    nixpacks build . --name reimbursement-bot:latest
    docker compose up -d
    ```
-4. Watch startup logs (first poll / DB init / backup happens here):
+4. Watch startup logs (first poll, DB init, and backup happen here):
    ```bash
    docker compose logs -f
    ```
@@ -149,23 +129,13 @@ docker compose exec bot sh -c 'ls -la /app/data /app/backups'
 pytest                       # full suite (unit + integration, all mocked)
 ```
 
-Runtime dependencies are hash-pinned in `requirements.lock` (generated with
-`pip-compile --generate-hashes`); dev tools (`ruff`, `mypy`, `pip-audit`,
-`pytest`) are installed unpinned in CI / `requirements-dev.txt`.
+Runtime dependencies are hash-pinned in `requirements.lock` (generated with `pip-compile --generate-hashes`); dev tools (`ruff`, `mypy`, `pip-audit`, `pytest`) are installed unpinned in CI / `requirements-dev.txt`.
 
-Integration tests use fakes for Telegram and the AI provider, so the suite runs
-offline.
+Integration tests use fakes for Telegram and the AI provider, so the whole suite runs offline.
 
 ## Project layout
 
-> **Note on structure.** The plan (§7) suggests separate `bot/commands.py`,
-> `bot/handlers.py`, `services/processing_service.py` and `models/batch.py`. For
-> a single-module pipeline we consolidated these deliberately:
-> PTB handlers live in `bot/bot.py` (with pure decision logic in
-> `bot/logic.py` for testability), the orchestration pipeline lives in
-> `services/receipt_service.py`, and `Batch` lives alongside `Receipt` in
-> `models/receipt.py`. This keeps each subsystem cohesive without changing any
-> behaviour.
+A word on structure. The plan (its §7) suggests separate `bot/commands.py`, `bot/handlers.py`, `services/processing_service.py`, and `models/batch.py`. For a single-module pipeline we deliberately consolidated those. PTB handlers live in `bot/bot.py` with the pure decision logic split out into `bot/logic.py` for testability. The orchestration pipeline sits in `services/receipt_service.py`, and `Batch` lives alongside `Receipt` in `models/receipt.py`. Each subsystem stays cohesive without changing behaviour.
 
 ```
 app/
@@ -185,10 +155,7 @@ tests/
 
 ## Backups & restore
 
-The state (`data/sessions.db`) and audit (`data/receipts.db`) databases are backed
-up to `backups/` at startup via the SQLite online-backup API. To restore from a
-backup, stop the bot, copy a `*_sessions_*.db` / `*_receipts_*.db` file over the
-live database, and start it again:
+The state (`data/sessions.db`) and audit (`data/receipts.db`) databases get backed up to `backups/` at startup via the SQLite online-backup API. To restore, stop the bot, copy a `*_sessions_*.db` or `*_receipts_*.db` file over the live database, and start it again:
 
 ```bash
 cp backups/receipts_receipts_20240101_120000.db data/receipts.db
@@ -198,13 +165,11 @@ cp backups/receipts_receipts_20240101_120000.db data/receipts.db
 
 With `HEALTH_ENABLED=true`, a zero-dependency HTTP server serves:
 - `GET /health` → `{"status":"ok"}`
-- `GET /metrics` → JSON of the in-process counters
-  (`processed`, `review`, `failed`, `delivered`, `ai_calls`, `ai_errors`)
+- `GET /metrics` → JSON of the in-process counters (`processed`, `review`, `failed`, `delivered`, `ai_calls`, `ai_errors`)
 
 ## Production checklist
 
-- `ALLOWED_USER_IDS` is populated (default-denies everyone else).
+- `ALLOWED_USER_IDS` is populated, so everyone else is default-denied.
 - `BOT_PASSWORD` is set and strong.
-- Secrets live only in `.env`, never in Git/image/logs.
-- The report PDF embeds the original receipt image per row, preserves aspect
-  ratio, breaks across multiple pages, and ends with a `Decimal`-computed total.
+- Secrets live only in `.env`, never in Git, the image, or logs.
+- The report PDF embeds the original receipt image per row, preserves aspect ratio, breaks across pages, and ends with a `Decimal`-computed total.
