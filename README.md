@@ -81,7 +81,7 @@ Send a photo or a JPEG/PNG/WEBP image document to stage a receipt.
 
 ## Docker (VPS deployment)
 
-Nixpacks builds the image; the plan lives in `nixpacks.toml` with pinned Python 3.12, hash-pinned `requirements.lock`, and the correct entrypoint. The container runs as a non-root user (uid 1000) on a tmpfs for temporary files. Secrets come in at runtime via `.env` and never get baked into the image. Durable state (`receipts.db`, `sessions.db`, plus their backups) lives in named Docker volumes, so it survives rebuilds.
+A hand-written `Dockerfile` (python:3.12-slim, ~222MB) builds the image — not Nixpacks (Nixpacks would pull in a fat Ubuntu base with the Nix toolchain and produce a ~1GB image). The image pins Python 3.12, installs the hash-pinned `requirements.lock`, and runs as a non-root user (uid 1000) on a tmpfs for temporary files. Secrets come in at runtime via `.env` and never get baked into the image. Durable state (`receipts.db`, `sessions.db`, plus their backups) lives in named Docker volumes, so it survives rebuilds.
 
 ### Deploy on a VPS
 
@@ -96,13 +96,13 @@ Nixpacks builds the image; the plan lives in `nixpacks.toml` with pinned Python 
    # edit .env, set TELEGRAM_TOKEN, ALLOWED_USER_IDS, ALLOWED_CHAT_IDS,
    # BOT_PASSWORD, and the AI provider settings (OPENAI_API_KEY or OLLAMA_*)
    ```
-3. Build and start in one shot (runs `nixpacks build` then `docker compose up`):
+3. Build and start in one shot (`docker compose build` then `docker compose up`):
    ```bash
    ./deploy.sh
    ```
    Or manually:
    ```bash
-   nixpacks build . --name reimbursement-bot:latest
+   docker compose build
    docker compose up -d
    ```
 4. Watch startup logs (first poll, DB init, and backup happen here):
