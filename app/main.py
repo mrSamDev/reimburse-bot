@@ -151,15 +151,13 @@ def _start_health_server(config: Config) -> None:
     """Serve ``/health`` and ``/metrics`` in a daemon thread if enabled."""
     if not config.health_enabled:
         return
-    server = create_health_server(port=config.health_port)
+    server = create_health_server(port=config.health_port, token=config.health_token)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("health server listening on :%d", config.health_port)
 
 
 def main() -> None:
-    # Load the local .env (never commit it). Values are read into the env and
-    # then parsed by load_config().
     load_dotenv(PROJECT_ROOT / ".env")
     try:
         config = load_config()

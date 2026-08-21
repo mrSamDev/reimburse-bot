@@ -159,3 +159,12 @@ def test_ai_max_calls_per_run_must_be_positive(monkeypatch):
     monkeypatch.setenv("AI_MAX_CALLS_PER_RUN", "0")
     with pytest.raises((ConfigError, ValueError)):
         load_config(strict=False)
+
+
+def test_health_token_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("HEALTH_TOKEN", raising=False)
+    assert load_config(strict=False).health_token == ""
+
+    env_file = tmp_path / "envfile"
+    env_file.write_text("HEALTH_TOKEN=probe-secret\n")
+    assert load_config(env_file=env_file, strict=False).health_token == "probe-secret"

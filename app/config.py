@@ -60,6 +60,7 @@ class Config(BaseModel):
     log_format: str = "text"
     health_enabled: bool = False
     health_port: int = 8080
+    health_token: str = ""
     report_title: str = "Heading Travel Expenses"
     # Deprecated: the report period is now derived from the receipts'
     # transaction dates (see app/services/report_period.py), not read from env.
@@ -267,6 +268,7 @@ def _from_env() -> dict[str, Any]:
         "log_format": get("LOG_FORMAT", "text"),
         "health_enabled": (get("HEALTH_ENABLED", "false") or "false").lower() in ("1", "true", "yes"),
         "health_port": int(get("HEALTH_PORT", "8080")),
+        "health_token": get("HEALTH_TOKEN", ""),
         "report_title": get("REPORT_TITLE", "Heading Travel Expenses"),
     }
 

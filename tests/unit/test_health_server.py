@@ -30,3 +30,38 @@ def test_health_and_metrics_endpoints():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _get(base, path, headers=None):
+    req = urllib.request.Request(f"{base}{path}", headers=headers or {})
+    return urllib.request.urlopen(req, timeout=3).read()
+
+
+def test_metrics_requires_token_when_configured():
+    server = create_health_server(host="127.0.0.1", port=0, token="s3cret")
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        # /health stays open (liveness probe).
+        health = json.loads(_get(base, "/health"))
+        assert health["status"] == "ok"
+        # /metrics without a token -> 401.
+        try:
+            _get(base, "/metrics")
+            raise AssertionError("expected 401")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+        # /metrics with a wrong token -> 401.
+        try:
+            _get(base, "/metrics", {"Authorization": "Bearer wrong"})
+            raise AssertionError("expected 401")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 401
+        # /metrics with the correct Bearer token -> 200.
+        body = json.loads(_get(base, "/metrics", {"Authorization": "Bearer s3cret"}))
+        assert "processed" in body
+    finally:
+        server.shutdown()
+        server.server_close()
