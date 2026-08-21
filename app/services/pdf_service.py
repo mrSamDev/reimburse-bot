@@ -86,11 +86,15 @@ def _build_styles() -> dict[str, ParagraphStyle]:
         "Total", fontName="Helvetica-Bold", fontSize=12, leading=15,
         alignment=TA_RIGHT, spaceBefore=10,
     )
+    header_total = ParagraphStyle(
+        "HeaderTotal", fontName="Helvetica-Bold", fontSize=13, leading=17,
+        alignment=TA_RIGHT, textColor=colors.HexColor("#1a1a1a"),
+    )
     return {
         "h1": h1, "h2": h2,
         "cell_left": cell_left, "cell_right": cell_right,
         "header_left": header_left, "header_right": header_right,
-        "total": total,
+        "total": total, "header_total": header_total,
     }
 
 
@@ -141,6 +145,37 @@ def _build_table(
     return table
 
 
+def _totals_lines(batch: Batch) -> list[str]:
+    """Format total line(s). Never combine different currencies."""
+    if len(batch.currencies()) == 1:
+        currency = batch.currencies()[0]
+        return [f"Total: {currency} {_money(batch.currency_totals[currency])}"]
+    return [
+        f"{currency} Total: {_money(batch.currency_totals[currency])}"
+        for currency in batch.currencies()
+    ]
+
+
+def _build_header(title: str, totals_lines: list[str], st: dict) -> Table:
+    """Title (left) and grand total (right) on one line for quick glance."""
+    header = Table(
+        [[
+            Paragraph(title, st["h1"]),
+            Paragraph("<br/>".join(totals_lines), st["header_total"]),
+        ]],
+        colWidths=[110 * mm, 60 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return header
+
+
 def generate_report(
     batch: Batch,
     out_path: str | Path,
@@ -169,9 +204,8 @@ def generate_report(
         author="Reimbursement Report Generator",
     )
 
-    story = [Paragraph(title, st["h1"])]
-    if period:
-        story.append(Paragraph(period, st["h2"]))
+    # Grand total in the header so it is visible at a glance.
+    story = [_build_header(title, _totals_lines(batch), st)]
 
     # Row shape expected by the table: (receipt text, amount, image path).
     rows: list[tuple[str, str, str | None]] = []
@@ -184,15 +218,8 @@ def generate_report(
     story.append(Spacer(1, 4 * mm))
 
     # Totals section. Never combine different currencies into one total.
-    if len(batch.currencies()) == 1:
-        currency = batch.currencies()[0]
-        total = batch.currency_totals[currency]
-        story.append(Paragraph(f"Total: {currency} {_money(total)}", st["total"]))
-    else:
-        for currency in batch.currencies():
-            total = batch.currency_totals[currency]
-            story.append(Paragraph(f"{currency} Total: {_money(total)}", st["total"]))
-
+    for line in _totals_lines(batch):
+        story.append(Paragraph(line, st["total"]))
     doc.build(story)
     logger.info("PDF report written to %s", out_path)
     return out_path

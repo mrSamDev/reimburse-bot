@@ -42,7 +42,10 @@ def test_reference_pdf_header_and_period(tmp_path):
     text = " ".join((p.extract_text() or "") for p in reader.pages)
     text = " ".join(text.split())
     assert "Heading Travel Expenses" in text
-    assert "July Expenses" in text
+    # Subtitle (period) is intentionally not rendered.
+    assert "July Expenses" not in text
+    # Total visible in the header for quick glance.
+    assert text.split("Receipt")[0].startswith("Heading Travel Expenses Total: AED 1,304.00")
 
 
 def test_reference_pdf_contains_descriptions_and_amounts(tmp_path):

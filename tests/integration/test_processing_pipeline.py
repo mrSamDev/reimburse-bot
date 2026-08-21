@@ -111,9 +111,9 @@ async def test_custom_title_lands_in_pdf(tmp_path):
     assert "July Expenses" in text
 
 
-async def test_report_period_derived_from_receipt_dates(tmp_path):
-    """The PDF period subtitle comes from the receipts' transaction dates, not
-    from config. Regression: period was read from REPORT_PERIOD env."""
+async def test_report_period_not_rendered_as_subtitle(tmp_path):
+    """The PDF shows only the main title, no period subtitle. Regression guard
+    for the removed subtitle: period never appears in the rendered text."""
     from pypdf import PdfReader
 
     cfg = _config(tmp_path)
@@ -124,8 +124,8 @@ async def test_report_period_derived_from_receipt_dates(tmp_path):
         text = " ".join((p.extract_text() or "") for p in PdfReader(str(result.out_pdf_path)).pages)
         text = " ".join(text.split())
 
-    # Most receipts dated in July -> "July Expenses" dominates despite the
-    # config still carrying the old default value.
+    # Receipts dated in July and the config default both say "July Expenses",
+    # but the subtitle must not be rendered at all.
     svc = ProcessingService(
         cfg,
         FakeProvider([
@@ -135,7 +135,9 @@ async def test_report_period_derived_from_receipt_dates(tmp_path):
         FakeTelegram(),
     )
     await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir, deliver=deliver)
-    assert "July Expenses" in text
+    assert "July Expenses" not in text
+    # Total is visible in the header for quick glance.
+    assert text.split("Receipt")[0].startswith("Heading Travel Expenses Total: AED 104.50")
 
 
 async def test_custom_title_falls_back_to_config(tmp_path):

@@ -48,10 +48,11 @@ def test_one_receipt_pdf(tmp_path):
     out = generate_report(b, tmp_path / "one.pdf", period="July Expenses")
     text = _text(out)
     assert "Heading Travel Expenses" in text
-    assert "July Expenses" in text
     assert "Ride with Sazzad" in text
     assert "AED 53.50" in text
     assert "Total: AED 53.50" in text
+    # Total visible in the header at a glance.
+    assert "Total: AED 53.50" in text.split("Ride with Sazzad")[0]
 
 
 def test_two_receipts(tmp_path):
@@ -152,10 +153,11 @@ def test_pdf_valid(tmp_path):
     assert len(reader.pages) >= 1
 
 
-def test_configurable_title_and_period(tmp_path):
+def test_configurable_title_no_subtitle(tmp_path):
     b = _batch([_r("A", "10")])
     out = generate_report(b, tmp_path / "cfg.pdf", title="Business Expenses", period="August 2026")
     text = _text(out)
     assert "Business Expenses" in text
-    assert "August 2026" in text
+    # Subtitle (period) is intentionally not rendered.
+    assert "August 2026" not in text
     assert "July" not in text
