@@ -59,6 +59,8 @@ python -m app.main         # start long polling
 | `DATA_DIR` | Persistent data root (holds the `receipts.db` audit ledger) |
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
+| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 2) |
+| `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 300) |
 | `REPORT_TITLE` / `REPORT_PERIOD` | Report header metadata |
 
 ## Commands

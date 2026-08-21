@@ -1,6 +1,7 @@
 """Integration tests for the processing pipeline using fakes."""
 
 import logging
+import threading
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -61,6 +62,7 @@ def _config(tmp: Path, max_receipts: int = 20) -> Config:
         ai_provider="openai", openai_api_key="x", temp_dir=tmp, max_receipts=max_receipts,
         report_title="Heading Travel Expenses", report_period="July Expenses",
         ai_retry_base_delay=0,  # keep integration tests fast (no real backoff sleeps)
+        ai_concurrency=1,  # sequential: keeps sequence-based tests deterministic
     )
 
 
@@ -248,6 +250,36 @@ async def test_receipt_failures_collected(tmp_path):
     assert len(result.receipt_failures) == 1
     assert result.receipt_failures[0]["file_id"] == "f1"
     assert result.receipt_failures[0]["reason"]
+
+
+class _TrackingProvider:
+    """Counts peak concurrent extract_receipt calls (thread-safe)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._now = 0
+        self.peak = 0
+
+    def extract_receipt(self, image_path):
+        with self._lock:
+            self._now += 1
+            self.peak = max(self.peak, self._now)
+        time.sleep(0.03)
+        with self._lock:
+            self._now -= 1
+        return _ext("A", "10")
+
+
+async def test_ai_concurrency_capped(tmp_path):
+    cfg = _config(tmp_path, max_receipts=10)
+    cfg.ai_concurrency = 2
+    provider = _TrackingProvider()
+    svc = ProcessingService(cfg, provider, FakeTelegram())
+    await run_with_cleanup(svc, 1, [f"f{i}" for i in range(6)], cfg.temp_dir)
+    # The cap invariant: never more than `ai_concurrency` in flight at once.
+    assert provider.peak <= 2
+    # With 6 slow receipts the pipeline did overlap (parallelism actually happened).
+    assert provider.peak >= 2
 
 
 async def test_ledger_persists_accepted_receipt(tmp_path):

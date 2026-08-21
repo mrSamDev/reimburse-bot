@@ -169,15 +169,29 @@ class ProcessingService:
             deadline = (loop.time() + budget) if budget > 0 else None
 
             def _check_deadline() -> None:
+                # Soft total-time check: enforced after the concurrent phase, before
+                # the ordered phase and PDF generation (not per-receipt).
                 if deadline is not None and loop.time() > deadline:
                     raise ProcessingError(
                         f"Processing time limit ({budget}s) exceeded"
                     )
 
             try:
-                for idx, file_id in enumerate(file_ids):
+                # Phase 1: extract all receipts concurrently, capped by a per-request
+                # semaphore so a batch of N never over-saturates the AI provider.
+                sem = asyncio.Semaphore(self._config.ai_concurrency)
+
+                async def _limited(file_id, idx):
+                    async with sem:
+                        return await self._process_one(file_id, idx, input_dir, normalized_dir)
+
+                outcomes = await asyncio.gather(
+                    *(_limited(file_id, idx) for idx, file_id in enumerate(file_ids))
+                )
+
+                # Phase 2: assemble the batch in input order (deterministic).
+                for idx, (file_id, outcome) in enumerate(zip(file_ids, outcomes, strict=True)):
                     _check_deadline()
-                    outcome = await self._process_one(file_id, idx, input_dir, normalized_dir)
                     if outcome.failed:
                         failed += 1
                         receipt_failures.append({"file_id": file_id, "reason": outcome.reason})
