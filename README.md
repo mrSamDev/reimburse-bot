@@ -25,6 +25,12 @@ generates a PDF reimbursement report via a vision AI provider.
 - An OpenAI API key **or** an Ollama (vision) endpoint
 - An allowance list of numeric Telegram user IDs
 
+## How it connects to Telegram
+
+The bot uses **long polling** — it connects *out* to Telegram's API, so it needs
+no public URL, no port forwarding, and **no ngrok**. Read
+[`docs/telegram-connection.md`](docs/telegram-connection.md) for the details.
+
 ## Setup
 
 ```bash

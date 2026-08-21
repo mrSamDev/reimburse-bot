@@ -1,6 +1,7 @@
 """Integration tests for the processing pipeline using fakes."""
 
 import logging
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -194,6 +195,31 @@ async def test_pdf_contains_receipt_descriptions(tmp_path):
     assert "Ride with Sazzad" in delivered["text"]
     assert "Bolt" in delivered["text"]
     assert "126.50" in delivered["text"]  # total
+
+
+class _SlowProvider:
+    def extract_receipt(self, image_path):
+        time.sleep(0.03)
+        return _ext("A", "10")
+
+
+async def test_batch_time_budget_aborts_cleanly(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.max_processing_seconds = 0.01  # far below what 2 slow receipts need
+    svc = ProcessingService(cfg, _SlowProvider(), FakeTelegram())
+    with pytest.raises(ProcessingError):
+        await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
+    # Cleanup still ran even though the batch was aborted.
+    leftovers = [p for p in Path(cfg.temp_dir).iterdir() if p.name.startswith("request_")]
+    assert leftovers == []
+
+
+async def test_batch_budget_zero_disables_limit(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.max_processing_seconds = 0  # disabled
+    svc = ProcessingService(cfg, FakeProvider([_ext("A", "10")]), FakeTelegram())
+    result = await run_with_cleanup(svc, 1, ["f1"], cfg.temp_dir)
+    assert result.processed_count == 1
 
 
 async def test_ledger_persists_accepted_receipt(tmp_path):

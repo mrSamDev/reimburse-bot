@@ -1,4 +1,4 @@
-"""Tests for transient AI failure retry/backoff."""
+"""Tests for transient AI failure retry/backoff with jitter."""
 
 import asyncio
 
@@ -25,39 +25,65 @@ class _FlakyProvider:
         return ReceiptExtraction(merchant_name="M", total="10")
 
 
-def test_retries_then_succeeds(monkeypatch):
+def test_retries_then_succeeds_with_jittered_backoff():
     sleeps = []
+    rands = iter([0.5, 0.9])
+
     async def fake_sleep(delay):
         sleeps.append(delay)
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
     provider = _FlakyProvider(fail_for=2)
-    result = asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=3, base_delay=0.1))
-    assert provider.calls == 3
+    result = asyncio.run(
+        _extract_with_retry(
+            provider, "/img.jpg", max_attempts=3, base_delay=1.0,
+            _sleep=fake_sleep, _rand=lambda: next(rands),
+        )
+    )
     assert result.merchant_name == "M"
-    assert len(sleeps) == 2  # backoff between retries
+    # Two retries, each with full-jitter delay in (0, base*(attempt+1)].
+    assert len(sleeps) == 2
+    assert 0 < sleeps[0] <= 1.0 and sleeps[0] == 0.5
+    assert 0 < sleeps[1] <= 2.0 and sleeps[1] == 1.8
 
 
-def test_no_retry_needed_when_first_call_succeeds(monkeypatch):
+def test_no_retry_needed_when_first_call_succeeds():
     sleeps = []
     async def fake_sleep(delay):
         sleeps.append(delay)
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     provider = _FlakyProvider(fail_for=0)
-    asyncio.run(_extract_with_retry(provider, "/img.jpg"))
+    asyncio.run(
+        _extract_with_retry(provider, "/img.jpg", _sleep=fake_sleep)
+    )
     assert provider.calls == 1
     assert sleeps == []
 
 
-def test_exhausts_attempts_and_raises(monkeypatch):
+def test_deterministic_with_injected_rand():
     sleeps = []
     async def fake_sleep(delay):
         sleeps.append(delay)
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    # Force rand to 1.0 so delay == base*(attempt+1): no jitter, deterministic.
+    provider = _FlakyProvider(fail_for=2)
+    asyncio.run(
+        _extract_with_retry(
+            provider, "/img.jpg", max_attempts=3, base_delay=0.5,
+            _sleep=fake_sleep, _rand=lambda: 1.0,
+        )
+    )
+    assert sleeps == [0.5, 1.0]
+
+
+def test_exhausts_attempts_and_raises():
+    sleeps = []
+    async def fake_sleep(delay):
+        sleeps.append(delay)
     provider = _FlakyProvider(fail_for=99)
     with pytest.raises(AIProviderError):
-        asyncio.run(_extract_with_retry(provider, "/img.jpg", max_attempts=3, base_delay=0.1))
+        asyncio.run(
+            _extract_with_retry(provider, "/img.jpg", max_attempts=3, base_delay=0.5, _sleep=fake_sleep)
+        )
     assert provider.calls == 3
-    assert sleeps == [0.1, 0.2]  # increasing backoff, then give up
+    assert len(sleeps) == 2  # backoff between attempts, then give up
 
 
 def test_single_attempt_does_not_retry():

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,12 +74,16 @@ async def _extract_with_retry(
     *,
     max_attempts: int = 3,
     base_delay: float = 1.0,
+    _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    _rand: Callable[[], float] = random.random,
 ) -> ReceiptExtraction:
     """Extract a receipt, retrying transient provider failures with backoff.
 
     Only retries :class:`AIProviderError` (transport/parse failures that may be
     transient). Validation errors are not retried because the AI already
-    returned data that failed hard checks. Raises after ``max_attempts``.
+    returned data that failed hard checks. Backoff uses full jitter to avoid a
+    thundering herd on a recovering provider. Raises after ``max_attempts``.
+    ``_sleep``/``_random`` are injectable for deterministic tests.
     """
     for attempt in range(max_attempts):
         try:
@@ -85,7 +91,9 @@ async def _extract_with_retry(
         except AIProviderError:
             if attempt == max_attempts - 1:
                 raise
-            await asyncio.sleep(base_delay * (attempt + 1))
+            # Full jitter: sleep in [0, base_delay * (attempt+1)].
+            delay = base_delay * (attempt + 1) * _rand()
+            await _sleep(delay)
     raise AIProviderError("unreachable")  # pragma: no cover
 
 
@@ -153,8 +161,19 @@ class ProcessingService:
             logger.info(
                 "processing started: user=%s receipts=%d", user_id, len(file_ids)
             )
+            loop = asyncio.get_running_loop()
+            budget = self._config.max_processing_seconds
+            deadline = (loop.time() + budget) if budget > 0 else None
+
+            def _check_deadline() -> None:
+                if deadline is not None and loop.time() > deadline:
+                    raise ProcessingError(
+                        f"Processing time limit ({budget}s) exceeded"
+                    )
+
             try:
                 for idx, file_id in enumerate(file_ids):
+                    _check_deadline()
                     outcome = await self._process_one(file_id, idx, input_dir, normalized_dir)
                     if outcome.failed:
                         failed += 1
@@ -186,6 +205,7 @@ class ProcessingService:
                 batch.failed_count = failed
                 batch.review_count = sum(1 for r in batch.receipts if r.review_required)
 
+                _check_deadline()
                 out_pdf = output_dir / _pdf_filename(request_id)
                 await asyncio.to_thread(
                     generate_report,
