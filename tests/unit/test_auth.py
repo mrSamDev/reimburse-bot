@@ -3,7 +3,7 @@
 import pytest
 
 from app.config import Config
-from app.services.security_service import AuthError, SecurityService
+from app.services.security_service import SecurityService
 
 
 def _svc(**kw):
@@ -34,14 +34,6 @@ def test_multiple_authorized_users():
 def test_no_allowlist_denies_everyone():
     s = _svc(allowed_user_ids="")
     assert not s.is_authorized_user(111)
-
-
-def test_unauthorized_upload_rejected():
-    s = _svc()
-    with pytest.raises(AuthError):
-        s.check_authorized(999, None)
-    with pytest.raises(AuthError):
-        s.check_authorized(None, None)
 
 
 def test_chat_restriction_applies():

@@ -7,10 +7,6 @@ import hmac
 from app.config import Config
 
 
-class AuthError(Exception):
-    """Raised for authorization failures."""
-
-
 class SecurityService:
     """Stateless helpers for user authorization and password verification."""
 
@@ -36,10 +32,6 @@ class SecurityService:
 
     def is_authorized(self, user_id: int | None, chat_id: int | None) -> bool:
         return self.is_authorized_user(user_id) and self.is_authorized_chat(chat_id)
-
-    def check_authorized(self, user_id: int | None, chat_id: int | None) -> None:
-        if not self.is_authorized(user_id, chat_id):
-            raise AuthError("Unauthorized")
 
     @property
     def has_password(self) -> bool:

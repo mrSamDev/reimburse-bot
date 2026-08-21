@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -41,17 +40,3 @@ def validate_extraction(extraction: ReceiptExtraction, source_file_id: str) -> R
     except ValidationError as exc:
         raise AIValidationError(f"Receipt failed business validation: {exc}") from exc
     return apply_assessment(receipt)
-
-
-def validate_ai_result(raw: dict[str, Any], source_file_id: str) -> Receipt:
-    """Turn raw AI JSON into a trusted, financially-validated Receipt.
-
-    Hard failures (unusable shape, missing required fields, invalid amounts)
-    raise :class:`AIValidationError`. Soft issues (reconciliation mismatch, low
-    confidence, missing date) are folded into ``review_required``.
-    """
-    try:
-        extraction = ReceiptExtraction(**raw)
-    except ValidationError as exc:
-        raise AIValidationError(f"AI output failed schema validation: {exc}") from exc
-    return validate_extraction(extraction, source_file_id)
