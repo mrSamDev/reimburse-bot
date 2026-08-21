@@ -36,8 +36,23 @@ async def _maintenance_loop(sweeper, interval_seconds: float) -> None:
 
 
 def _make_post_init(sessions: SessionStore, interval_seconds: float):
+    """Return a ``post_init`` that starts the maintenance task and tracks it.
+
+    Uses ``asyncio.get_running_loop().create_task`` directly (not
+    ``Application.create_task``) so the task is actually tracked/cancelled at
+    shutdown instead of firing PTB's "won't be awaited" warning.
+    """
     async def _post_init(application) -> None:
-        application.create_task(_maintenance_loop(sessions.sweep, interval_seconds))
+        async def _post_shutdown(_app) -> None:
+            task = getattr(_app, "_maintenance_task", None)
+            if task is not None:
+                task.cancel()
+
+        application.post_shutdown = _post_shutdown
+        application._maintenance_task = asyncio.get_running_loop().create_task(
+            _maintenance_loop(sessions.sweep, interval_seconds)
+        )
+
     return _post_init
 
 
