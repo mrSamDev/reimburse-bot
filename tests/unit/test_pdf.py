@@ -74,14 +74,26 @@ def test_many_receipts_multipage(tmp_path):
     assert "Total: AED 820.00" in text
 
 
-def test_review_warning_hidden_in_pdf(tmp_path):
-    # Per-receipt review warnings are not rendered in the PDF; the human gets
-    # the review count from the Telegram message instead.
+def test_review_warning_rendered_in_pdf(tmp_path):
+    # Per-receipt review warnings must be visible in the PDF so the human can
+    # see *which* receipts need attention (the Telegram caption only gives a
+    # count).
     r = _r("Low conf", "10.00", confidence=0.2, notes="blurry", review_required=True)
     b = _batch([r])
     out = generate_report(b, tmp_path / "review.pdf")
-    assert "Review required" not in _text(out)
-    assert "blurry" not in _text(out)
+    text = _text(out)
+    assert "Review required" in text
+    assert "blurry" in text
+
+
+def test_transaction_date_rendered_in_row(tmp_path):
+    # Each receipt row must include its transaction date, not just the merchant.
+    r = _r("Vendor", "53.50", date="Jun 23, 2026")
+    b = _batch([r])
+    out = generate_report(b, tmp_path / "date.pdf")
+    text = _text(out)
+    assert "Vendor" in text
+    assert "Jun 23, 2026" in text
 
 
 def test_image_aspect_preserved_no_distortion(tmp_path):

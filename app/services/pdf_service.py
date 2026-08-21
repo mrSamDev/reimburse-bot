@@ -27,7 +27,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.models.receipt import Batch
+from app.models.receipt import Batch, Receipt
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,21 @@ IMAGE_WIDTH_PT = 95.0
 
 def _money(value: Decimal) -> str:
     return f"{Decimal(value):,.2f}"
+
+
+def _receipt_text(receipt: Receipt) -> str:
+    """Build the safe, pre-escaped description text for a receipt row.
+
+    Merchant name, transaction date and (when flagged) a review warning. Every
+    user-provided field is XML-escaped before being joined with ``<br/>`` so the
+    ``Paragraph`` cell renders real line breaks and no markup from receipt data
+    is interpreted."""
+    parts = [escape(receipt.merchant_name)]
+    parts.append(escape(receipt.display_date()))
+    if receipt.review_required:
+        warn = (receipt.notes or "").strip() or "Review required"
+        parts.append(f"⚠ <b>Review required:</b> {escape(warn)}")
+    return "<br/>".join(parts)
 
 
 def _scaled_image(path: Path, target_width_pt: float) -> Image:
@@ -117,7 +132,7 @@ def _build_table(
             img_cell = Paragraph("(image missing)", styles["cell_left"])
         table_data.append([
             img_cell,
-            Paragraph(escape(receipt_text), styles["cell_left"]),
+            Paragraph(receipt_text, styles["cell_left"]),
             Paragraph(escape(amount_display), styles["cell_right"]),
         ])
 
@@ -180,7 +195,7 @@ def generate_report(
     for receipt in batch.receipts:
         image_path = image_map.get(receipt.source_file_id)
         amount_display = f"{receipt.currency} {_money(receipt.total)}"
-        rows.append((receipt.merchant_name, amount_display, image_path))
+        rows.append((_receipt_text(receipt), amount_display, image_path))
 
     story.append(_build_table(rows, IMAGE_WIDTH_PT, st))
     story.append(Spacer(1, 4 * mm))
