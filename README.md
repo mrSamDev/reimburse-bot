@@ -2,6 +2,8 @@
 
 A private, password-protected Telegram bot that collects receipt photos and turns them into a PDF reimbursement report through a vision AI provider.
 
+Try it: **[t.me/reimbursement_mrsamdev_bot](https://t.me/reimbursement_mrsamdev_bot)** — @reimbursement_mrsamdev_bot
+
 ## How it works
 
 Receipts never leave Telegram until you ask for a report. The bot holds only each photo's `file_id` in a staging session, and downloads nothing until `/generate` plus the correct password. That's the whole trust model, so we don't need a public URL, port forwarding, or ngrok. It long-polls Telegram's API outbound and stays quietly behind your firewall. Details live in [`docs/telegram-connection.md`](docs/telegram-connection.md).
