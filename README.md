@@ -4,6 +4,8 @@ A private, password-protected Telegram bot that collects receipt photos and turn
 
 Try it: **[t.me/reimbursement_mrsamdev_bot](https://t.me/reimbursement_mrsamdev_bot)** — @reimbursement_mrsamdev_bot
 
+The bot is restricted to an allowance list. To use it, email your **Telegram USER_ID** to **sijo@sijosam.com** and you'll be added.
+
 <img src="assets/telegram-qr.png" alt="QR code linking to @reimbursement_mrsamdev_bot" width="300"/>
 
 ## How it works
