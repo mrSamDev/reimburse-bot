@@ -71,7 +71,47 @@ def test_unsupported_provider_rejected():
 
 
 def test_supported_providers_enum():
-    assert SUPPORTED_PROVIDERS == {"openai", "ollama"}
+    assert SUPPORTED_PROVIDERS == {"openai", "ollama", "pool"}
+
+
+def test_pool_requires_both_keys():
+    with pytest.raises(ValueError):
+        Config(ai_provider="pool", openai_api_key="k", ollama_base_url="").validate_operational()
+    with pytest.raises(ValueError):
+        Config(ai_provider="pool", openai_api_key="", ollama_base_url="http://x").validate_operational()
+
+
+def test_pool_with_both_keys_passes():
+    cfg = Config(ai_provider="pool", openai_api_key="k", ollama_base_url="http://x")
+    assert cfg.validate_operational() is cfg
+
+
+def test_pool_strategy_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_POOL_STRATEGY", raising=False)
+    assert load_config(strict=False).ai_pool_strategy == "round_robin"
+
+    env = tmp_path / ".env"
+    env.write_text("AI_POOL_STRATEGY=priority\n")
+    assert load_config(env_file=env, strict=False).ai_pool_strategy == "priority"
+
+
+def test_pool_strategy_invalid_rejected():
+    with pytest.raises(ValueError):
+        Config(ai_pool_strategy="random")
+
+
+def test_pool_primary_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_POOL_PRIMARY", raising=False)
+    assert load_config(strict=False).ai_pool_primary == "ollama"
+
+    env = tmp_path / ".env"
+    env.write_text("AI_POOL_PRIMARY=openai\n")
+    assert load_config(env_file=env, strict=False).ai_pool_primary == "openai"
+
+
+def test_pool_primary_invalid_rejected():
+    with pytest.raises(ValueError):
+        Config(ai_pool_primary="claude")
 
 
 def test_allowed_user_ids_parsing_comma_string():

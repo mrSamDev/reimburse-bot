@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-SUPPORTED_PROVIDERS = {"openai", "ollama"}
+SUPPORTED_PROVIDERS = {"openai", "ollama", "pool"}
 SUPPORTED_IMAGE_FORMATS = {"image/jpeg", "image/png", "image/webp"}
 
 
@@ -32,6 +32,8 @@ class Config(BaseModel):
     allowed_chat_ids: list[int] = Field(default_factory=list)
     bot_password: str = ""
     ai_provider: str = "openai"
+    ai_pool_strategy: str = "round_robin"
+    ai_pool_primary: str = "ollama"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     ollama_base_url: str = "http://localhost:11434/v1"
@@ -78,6 +80,22 @@ class Config(BaseModel):
             raise ValueError(
                 f"Unsupported AI provider '{v}'. Choose one of {sorted(SUPPORTED_PROVIDERS)}"
             )
+        return v
+
+    @field_validator("ai_pool_strategy")
+    @classmethod
+    def _check_pool_strategy(cls, v: str) -> str:
+        v = (v or "round_robin").strip().lower()
+        if v not in {"round_robin", "priority"}:
+            raise ValueError("ai_pool_strategy must be 'round_robin' or 'priority'")
+        return v
+
+    @field_validator("ai_pool_primary")
+    @classmethod
+    def _check_pool_primary(cls, v: str) -> str:
+        v = (v or "ollama").strip().lower()
+        if v not in {"openai", "ollama"}:
+            raise ValueError("ai_pool_primary must be 'openai' or 'ollama'")
         return v
 
     @field_validator("allowed_user_ids", "allowed_chat_ids", mode="before")
@@ -234,6 +252,11 @@ class Config(BaseModel):
             raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=openai")
         if self.ai_provider == "ollama" and not self.ollama_base_url:
             raise ValueError("OLLAMA_BASE_URL is required when AI_PROVIDER=ollama")
+        if self.ai_provider == "pool":
+            if not self.openai_api_key:
+                raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=pool")
+            if not self.ollama_base_url:
+                raise ValueError("OLLAMA_BASE_URL is required when AI_PROVIDER=pool")
         return self
 
 
@@ -251,6 +274,8 @@ def _from_env() -> dict[str, Any]:
         "allowed_chat_ids": get("ALLOWED_CHAT_IDS", ""),
         "bot_password": get("BOT_PASSWORD", ""),
         "ai_provider": get("AI_PROVIDER", "openai"),
+        "ai_pool_strategy": get("AI_POOL_STRATEGY", "round_robin"),
+        "ai_pool_primary": get("AI_POOL_PRIMARY", "ollama"),
         "openai_api_key": get("OPENAI_API_KEY", ""),
         "openai_model": get("OPENAI_MODEL", "gpt-4o-mini"),
         "ollama_base_url": get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
