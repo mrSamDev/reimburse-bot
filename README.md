@@ -20,7 +20,7 @@ Storage is temporary and request-scoped. Images and the PDF sit under `temp/requ
 
 State is durable. Per-user staging sessions and the cross-process per-user lease live in SQLite (`data/sessions.db`, WAL mode), so restarts don't lose anything and generation stays serialized across instances. A background sweep reclaims stale sessions and crashed leases.
 
-Generation is queued, not blocking. `/generate` (after the password) enqueues a job and replies immediately with your position in line; a pool of `WORKER_COUNT` background workers drains the queue, so concurrent users are processed with bounded parallelism instead of hammering the AI provider. The queue is **in-memory** — a restart drops queued jobs and resets those sessions to idle (they can re-run `/generate`).
+Generation is queued, not blocking. `/generate` (after the password) enqueues a job and replies immediately with your position in line; a pool of `WORKER_COUNT` background workers drains the queue, so concurrent users are processed with bounded parallelism instead of hammering the AI provider. The queue is **in-memory** — a restart drops queued jobs, notifies the affected users, and resets those sessions to idle (they can re-run `/generate`).
 
 Scaling is a wait-time dial, not a wall. With `W` workers, the last user waits roughly `total_receipts / W × time_per_receipt`. Raise `WORKER_COUNT` (up to your AI provider's rate limit) to cut wait time; the provider pool (`AI_PROVIDER=pool`) adds a second lane. The system degrades gracefully under load — it gets slower, never breaks.
 
