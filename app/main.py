@@ -172,16 +172,15 @@ def _start_health_server(config: Config, metrics_provider=None) -> None:
     logger.info("health server listening on :%d", config.health_port)
 
 
-def main() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
-    try:
-        config = load_config()
-        config.validate_operational()
-    except ConfigError as exc:
-        raise SystemExit(f"Configuration error: {exc}") from exc
-    except ValueError as exc:
-        raise SystemExit(f"Configuration error: {exc}") from exc
+def _bootstrap(config: Config) -> tuple[SessionStore, ReceiptLedger, InstanceLock]:
+    """Resolve/create runtime dirs, take the single-instance lock, sweep orphaned
+    request dirs, and initialize + back up the durable state DBs.
 
+    Runs before :func:`build_application` so a non-writable or misconfigured
+    environment fails fast (``SystemExit``) and so backups happen before
+    serving. Returns the ready-to-use stores and the held lock so ``main`` can
+    release it on shutdown.
+    """
     # Resolve dirs to absolute paths, creating + verifying them writable up front.
     config.temp_dir = Path(config.temp_dir).resolve()
     config.data_dir = Path(config.data_dir).resolve()
@@ -245,6 +244,35 @@ def main() -> None:
     except FileNotFoundError as exc:
         logger.warning("backup skipped: %s", exc)
 
+    return sessions, ledger, instance_lock
+
+
+def _run_polling(application: Application, instance_lock: InstanceLock) -> None:
+    """Block on Telegram long-polling, releasing the instance lock on exit.
+
+    ``run_polling`` returns only on shutdown (or raises); either way the lock is
+    released. On SIGKILL/OOM the kernel releases it via fd close instead.
+    """
+    try:
+        application.run_polling(drop_pending_updates=True)
+    finally:
+        # Release the lock on clean shutdown; if we were SIGKILLed/OOM'd the
+        # kernel already released it via fd close.
+        instance_lock.release()
+
+
+def main() -> None:
+    load_dotenv(PROJECT_ROOT / ".env")
+    try:
+        config = load_config()
+        config.validate_operational()
+    except ConfigError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+
+    sessions, ledger, instance_lock = _bootstrap(config)
+
     application, bot = build_application(config, sessions=sessions, ledger=ledger)
 
     def _metrics_provider() -> dict[str, Any]:
@@ -255,12 +283,7 @@ def main() -> None:
         return payload
 
     _start_health_server(config, metrics_provider=_metrics_provider)
-    try:
-        application.run_polling(drop_pending_updates=True)
-    finally:
-        # Release the lock on clean shutdown; if we were SIGKILLed/OOM'd the
-        # kernel already released it via fd close.
-        instance_lock.release()
+    _run_polling(application, instance_lock)
 
 
 if __name__ == "__main__":
