@@ -74,6 +74,26 @@ class ReimbursementBot:
         """Cancel and await the background workers (shutdown)."""
         await self.queue.stop()
 
+    async def notify_queued_lost(self) -> int:
+        """Notify users whose queued jobs were lost (in-memory queue reset on
+        restart) and reset those sessions to IDLE so they can re-run /generate.
+
+        Returns how many users were notified. Best-effort per user: a send
+        failure is logged and does not stop the reset.
+        """
+        queued = await self.sessions.get_queued()
+        if not queued:
+            return 0
+        for user_id, chat_id in queued:
+            try:
+                await self.telegram.send_message(chat_id, msg.QUEUE_LOST)
+            except Exception:
+                logger.exception(
+                    "failed to notify user %s of lost queued job", user_id
+                )
+        await self.sessions.reset_queued()
+        return len(queued)
+
     def _authorized(self, update):
         user = update.effective_user
         chat = update.effective_chat

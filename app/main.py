@@ -83,6 +83,11 @@ def _make_post_init(
 
     async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
+        # The job queue is in-memory, so a restart loses queued jobs; notify
+        # affected users and reset their sessions so they can re-run /generate.
+        lost = await bot.notify_queued_lost()
+        if lost:
+            logger.warning("notified %d users their queued job was lost", lost)
         bot.start_workers()
         holder["task"] = asyncio.get_running_loop().create_task(
             _maintenance_loop(
@@ -219,14 +224,6 @@ def main() -> None:
     purged = asyncio.run(sessions.purge_expired())
     if purged:
         logger.warning("purged %d expired sessions", purged)
-
-    # The job queue is in-memory, so a restart loses queued jobs; reset any
-    # sessions left in QUEUED so users aren't stuck waiting forever.
-    reset_queued = asyncio.run(sessions.reset_queued())
-    if reset_queued:
-        logger.warning(
-            "reset %d queued sessions to IDLE (queue is in-memory)", reset_queued
-        )
 
     # Durable backup of the audit + session DBs before serving.
     ledger = ReceiptLedger(config.data_dir / "receipts.db")

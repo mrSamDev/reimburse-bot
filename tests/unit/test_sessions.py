@@ -194,6 +194,21 @@ async def test_reset_queued_leaves_other_states_alone(tmp_path):
     assert (await store.get(2)).state == BotState.COLLECTING
 
 
+async def test_get_queued_returns_queued_sessions(tmp_path):
+    store = _store(tmp_path)
+    s1 = await store.get(1)
+    s1.state = BotState.QUEUED
+    await store.save(s1)
+    s2 = await store.get(2)
+    s2.state = BotState.PROCESSING
+    await store.save(s2)
+    s3 = await store.get(3)
+    s3.state = BotState.QUEUED
+    await store.save(s3)
+    queued = await store.get_queued()
+    assert queued == [(1, 1), (3, 3)]  # (user_id, chat_id) for QUEUED only
+
+
 # ---- TTL ------------------------------------------------------------------
 
 async def test_expired_session_returns_fresh(tmp_path):
@@ -488,6 +503,9 @@ async def test_post_init_starts_and_cancels_maintenance_task(tmp_path):
 
         async def stop_workers(self):
             self.stopped = True
+
+        async def notify_queued_lost(self):
+            return 0
 
     class _FakeApp:
         def __init__(self):

@@ -273,6 +273,29 @@ async def test_queue_full_leaves_receipts_staged(tmp_path):
     assert any("full" in r.lower() for r in msg.replies), msg.replies
 
 
+async def test_notify_queued_lost_sends_message_and_resets(tmp_path):
+    """On startup, users whose queued jobs were lost (in-memory queue reset)
+    are notified and their sessions reset to IDLE so they can re-run /generate."""
+    bot, transport, sessions = _build(tmp_path)
+    s = await sessions.get(111)
+    s.state = BotState.QUEUED
+    await sessions.save(s)
+
+    n = await bot.notify_queued_lost()
+    assert n == 1
+    assert (await sessions.get(111)).state == BotState.IDLE
+    assert any("lost" in m.lower() for m in transport.sent_messages), transport.sent_messages
+    await bot.stop_workers()
+
+
+async def test_notify_queued_lost_noop_when_none_queued(tmp_path):
+    bot, transport, sessions = _build(tmp_path)
+    n = await bot.notify_queued_lost()
+    assert n == 0
+    assert transport.sent_messages == []
+    await bot.stop_workers()
+
+
 async def test_unauthorized_user_rejected(tmp_path):
     bot, _, _ = _build(tmp_path)
     msg = FakeMessage("/start")

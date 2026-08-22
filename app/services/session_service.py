@@ -245,6 +245,21 @@ class SessionStore:
     async def reset_queued(self) -> int:
         return await asyncio.to_thread(self._op_reset_queued)
 
+    def _op_get_queued(self) -> list[tuple[int, int]]:
+        """Return ``(user_id, chat_id)`` for sessions currently in QUEUED (sync)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT user_id, chat_id FROM sessions WHERE state = ?",
+                (BotState.QUEUED.value,),
+            ).fetchall()
+            return [(r["user_id"], r["chat_id"]) for r in rows]
+        finally:
+            conn.close()
+
+    async def get_queued(self) -> list[tuple[int, int]]:
+        return await asyncio.to_thread(self._op_get_queued)
+
     def _op_purge_expired(self) -> int:
         """Remove sessions idle past the TTL (sync).
 
