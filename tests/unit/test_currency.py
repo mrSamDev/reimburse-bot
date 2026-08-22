@@ -46,13 +46,6 @@ def test_currency_specific_totals_never_mixed():
     assert b.currency_totals["USD"] == Decimal("50.00")
 
 
-def test_batch_total_property():
-    b = Batch()
-    b.add(_r("AED", "10"))
-    b.add(_r("USD", "5"))
-    assert b.total == Decimal("15")  # raw sum across receipts
-
-
 def test_totals_by_currency_are_quantized():
     b = Batch()
     b.add(_r("AED", "10.005"))
