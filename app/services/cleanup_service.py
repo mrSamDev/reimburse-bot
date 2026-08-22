@@ -24,23 +24,35 @@ def cleanup_request_dir(base: str | Path) -> None:
         logger.warning("cleanup of %s failed: %s", p, exc)
 
 
-def sweep_orphaned_requests(temp_root: str | Path) -> int:
+def sweep_orphaned_requests(
+    temp_root: str | Path, *, age_seconds: float = 600.0
+) -> int:
     """Remove leftover ``request_*`` directories from a crashed process.
 
     Normal runs clean up in ``finally``; a hard kill (SIGKILL/OOM) leaves
     orphans behind. Run once at startup so a previous crash never fills the
     temp filesystem. Returns how many directories were removed.
+
+    Only directories whose mtime is older than ``age_seconds`` are removed, so
+    a fresh in-flight request (e.g. from another instance sharing ``TEMP_DIR``)
+    is never destroyed. ``age_seconds=0`` removes everything (the historical
+    behavior, safe for a per-container tmpfs).
     """
+    import time
+
     root = Path(temp_root)
     removed = 0
     if not root.exists():
         return 0
-    # Known risk: this deletes every request_* dir at startup with no age check
-    # or instance scoping. Safe today because Docker uses a per-container tmpfs;
-    # if TEMP_DIR is ever a shared volume across instances, one instance's
-    # startup sweep would destroy another's in-flight request dirs.
+    cutoff = time.time() - age_seconds
     for entry in root.iterdir():
-        if entry.is_dir() and entry.name.startswith("request_"):
+        if not (entry.is_dir() and entry.name.startswith("request_")):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
             cleanup_request_dir(entry)
             removed += 1
     return removed

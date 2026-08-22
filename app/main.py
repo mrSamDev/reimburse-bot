@@ -211,7 +211,9 @@ def main() -> None:
         config.ai_retry_base_delay,
         config.image_max_edge,
     )
-    swept = sweep_orphaned_requests(config.temp_dir)
+    swept = sweep_orphaned_requests(
+        config.temp_dir, age_seconds=config.max_processing_seconds or 600.0
+    )
     if swept:
         logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)
 
