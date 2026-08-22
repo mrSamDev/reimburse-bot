@@ -1,5 +1,7 @@
 """Tests for the in-process metrics registry."""
 
+import threading
+
 from app.utils import metrics
 
 
@@ -56,3 +58,38 @@ def test_error_class_counters_increment():
     assert m["validation_error"] == 1
     assert m["ai_error"] == 1
     assert m["unexpected"] == 1
+
+
+def test_metrics_thread_safe_under_concurrent_read_write():
+    """Writers mutate the registry from threads while a reader snapshots it.
+
+    Guards against two failure modes: (1) ``dict(_METRICS)`` raising
+    ``RuntimeError: dictionary changed size during iteration`` when read from
+    another thread mid-mutation, and (2) lost updates from a non-atomic
+    read-modify-write. Both require a lock around the registry.
+    """
+    metrics.reset_metrics()
+    errors = []
+
+    def writer():
+        try:
+            for _ in range(2000):
+                metrics.inc("processed")
+                metrics.observe("receipt_processing_seconds", 1.0)
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    # Reader hammers get_metrics while writers mutate the registry.
+    for _ in range(2000):
+        metrics.get_metrics()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    m = metrics.get_metrics()
+    assert m["processed"] == 4 * 2000
+    assert m["receipt_processing_seconds_count"] == 4 * 2000
+    assert m["receipt_processing_seconds_sum"] == 4 * 2000

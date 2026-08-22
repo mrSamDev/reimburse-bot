@@ -105,3 +105,15 @@ async def test_concurrent_generate_only_one_runs():
 async def test_release_without_acquire_is_safe():
     m = UserLockManager()
     m.release(99)  # no-op, no exception
+
+
+async def test_locks_stats_reports_active_and_tracked():
+    m = UserLockManager()
+    assert m.stats() == {"active_locks": 0, "tracked_users": 0}
+    m.get(1)
+    assert m.stats()["tracked_users"] == 1
+    assert m.stats()["active_locks"] == 0
+    await m.acquire(1)
+    assert m.stats()["active_locks"] == 1
+    m.release(1)
+    assert m.stats()["active_locks"] == 0

@@ -4,25 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.ai.base import (
-    AIProviderError,
-    AIRateLimitError,
-    ReceiptExtraction,
-    ReceiptVisionProvider,
-)
+from app.ai.base import AIProviderError, ReceiptVisionProvider
 from app.ai.validation import AIValidationError, validate_extraction
 from app.config import Config
 from app.models.receipt import Batch, Receipt
 from app.services import file_validation
-from app.services.cleanup_service import cleanup_request_dir
 from app.services.ledger_service import ReceiptLedger
 from app.services.pdf_service import generate_report
 from app.services.report_period import derive_report_period
@@ -30,7 +22,19 @@ from app.services.telegram_service import TelegramService
 from app.utils import images, metrics
 from app.utils.logging import request_scope
 
-logger = logging.getLogger(__name__)
+from .retry import _CallBudget, _extract_with_retry
+from .types import (
+    BudgetExceededError,
+    ProcessingError,
+    ProcessingResult,
+    _pdf_filename,
+    _ReceiptOutcome,
+    make_request_base,
+)
+
+# Logged under the canonical package name so caplog/handler tests that target
+# ``app.services.receipt_service`` keep capturing pipeline records unchanged.
+logger = logging.getLogger("app.services.receipt_service")
 
 # Exceptions that mark a single receipt as failed but let the batch continue.
 RECEIPT_FAILURE_EXCEPTIONS = (
@@ -38,134 +42,6 @@ RECEIPT_FAILURE_EXCEPTIONS = (
     AIValidationError,
     file_validation.FileValidationError,
 )
-
-# Upper bound (seconds) for rate-limit backoff, applied before jitter.
-MAX_RATE_LIMIT_DELAY = 60.0
-
-
-class ProcessingError(Exception):
-    """Raised when processing cannot produce any usable report."""
-
-
-class BudgetExceededError(ProcessingError):
-    """Raised when the per-run AI call budget is exhausted mid-batch.
-
-    Subclass of :class:`ProcessingError` so it aborts the whole batch rather
-    than being treated as a single-receipt failure.
-    """
-
-
-@dataclass
-class ProcessingResult:
-    batch: Batch
-    out_pdf_path: Path
-    request_id: str
-    request_base: Path
-    processed_count: int = 0
-    failed_count: int = 0
-    review_count: int = 0
-    receipt_failures: list[dict] = field(default_factory=list)
-
-
-@dataclass
-class _ReceiptOutcome:
-    receipt: Receipt | None = None
-    failed: bool = False
-    reason: str = ""
-
-
-@dataclass
-class _CallBudget:
-    """Per-run counter of paid AI extraction calls.
-
-    Incremented synchronously in the event loop (never across an ``await``), so
-    it is safe to share across the concurrent receipts of one batch.
-    """
-
-    max_calls: int
-    used: int = 0
-
-    def acquire(self) -> bool:
-        """Reserve one call; return False when the budget is exhausted."""
-        if self.used >= self.max_calls:
-            return False
-        self.used += 1
-        return True
-
-
-def make_request_base(temp_root: str | Path, request_id: str) -> Path:
-    base = Path(temp_root) / f"request_{request_id}"
-    (base / "input").mkdir(parents=True, exist_ok=True)
-    (base / "normalized").mkdir(parents=True, exist_ok=True)
-    (base / "output").mkdir(parents=True, exist_ok=True)
-    return base
-
-
-def _pdf_filename(request_id: str) -> str:
-    date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"reimbursement_{date}_{request_id}.pdf"
-
-
-async def _extract_with_retry(
-    provider: ReceiptVisionProvider,
-    image_path: str | Path,
-    *,
-    max_attempts: int = 3,
-    base_delay: float = 1.0,
-    deadline: float | None = None,
-    budget: _CallBudget | None = None,
-    _sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    _rand: Callable[[], float] = random.random,
-    _now: Callable[[], float] | None = None,
-) -> ReceiptExtraction:
-    """Extract a receipt, retrying transient provider failures with backoff.
-
-    Only ``AIProviderError`` (possibly transient) is retried; validation errors
-    aren't. ``_sleep``/``_random``/``_now`` are injectable for tests.
-    """
-    loop = asyncio.get_running_loop()
-    now = _now or loop.time
-
-    async def _sleep_backoff(delay: float, exc: BaseException) -> None:
-        """Sleep ``delay`` unless the deadline is already spent; else stop."""
-        if deadline is None:
-            await _sleep(delay)
-            return
-        remaining = deadline - now()
-        if remaining <= 0:
-            raise exc
-        await _sleep(min(delay, remaining))
-
-    for attempt in range(max_attempts):
-        if budget is not None and not budget.acquire():
-            raise BudgetExceededError(
-                f"AI call budget ({budget.max_calls}) exhausted for this run"
-            )
-        metrics.inc("ai_calls")
-        try:
-            return await asyncio.to_thread(provider.extract_receipt, image_path)
-        except AIRateLimitError as exc:
-            metrics.inc("ai_rate_limited")
-            if attempt == max_attempts - 1:
-                raise
-            kind = getattr(exc, "kind", None)
-            if kind == "tokens":
-                # TPM window is 60s; the tiny Retry-After is useless, wait it out.
-                delay = MAX_RATE_LIMIT_DELAY
-            else:
-                retry_after = getattr(exc, "retry_after", None)
-                delay = retry_after if retry_after is not None else base_delay * (2**attempt)
-            delay = min(delay, MAX_RATE_LIMIT_DELAY)
-            delay = delay * (1 + _rand())
-            await _sleep_backoff(delay, exc)
-        except AIProviderError as exc:
-            metrics.inc("ai_errors")
-            if attempt == max_attempts - 1:
-                raise
-            # Full jitter: sleep in [0, base_delay * (attempt+1)].
-            delay = base_delay * (attempt + 1) * _rand()
-            await _sleep_backoff(delay, exc)
-    raise AIProviderError("unreachable")  # pragma: no cover
 
 
 class ProcessingService:
@@ -425,32 +301,3 @@ class ProcessingService:
             return _ReceiptOutcome(failed=True, reason=f"unexpected: {exc}")
         finally:
             metrics.observe("receipt_processing_seconds", time.monotonic() - start)
-
-
-async def run_with_cleanup(
-    service: ProcessingService,
-    user_id: int,
-    file_ids: list[str],
-    temp_root: str | Path,
-    deliver=None,
-    request_id: str | None = None,
-    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
-    *,
-    title: str = "",
-) -> ProcessingResult:
-    """Run processing, deliver the report, then guarantee cleanup.
-
-    ``deliver`` runs while the PDF still exists; ``request_id`` correlates
-    logs; ``on_progress`` is an optional ``(done, total)`` per-receipt callback.
-    """
-    request_id = request_id or uuid.uuid4().hex[:6]
-    base = make_request_base(temp_root, request_id)
-    try:
-        result = await service.process(
-            user_id, file_ids, request_base=base, on_progress=on_progress, title=title
-        )
-        if deliver is not None:
-            await deliver(result)
-        return result
-    finally:
-        cleanup_request_dir(base)

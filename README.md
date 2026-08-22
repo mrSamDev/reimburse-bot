@@ -14,9 +14,17 @@ Receipts never leave Telegram until you ask for a report. The bot holds only eac
 
 The AI does the reading, but the app owns the arithmetic. Every total is computed with Python `Decimal`, and AI output passes a Pydantic schema plus business rules before it's trusted. Raw model output never reaches the PDF layer.
 
-Storage is temporary and request-scoped. Images and the PDF sit under `temp/request_<id>/` and get deleted in a `finally` block even when something fails, while a startup sweep clears orphans left by a crash.
+With `AI_PROVIDER=pool`, OpenAI and Ollama Cloud run at the same time: `round_robin` spreads receipts across both for throughput, or `priority` prefers one and falls back to the other on failure or low confidence. This roughly doubles the AI throughput ceiling and adds redundancy if one provider is down.
+
+Storage is temporary and request-scoped. Images and the PDF sit under `temp/request_<id>/` and get deleted in a `finally` block even when something fails, while a startup sweep clears orphans left by a crash. In Docker the temp root is a 512m tmpfs, sized for several concurrent batches (each keeps raw + normalized images until the PDF is delivered).
 
 State is durable. Per-user staging sessions and the cross-process per-user lease live in SQLite (`data/sessions.db`, WAL mode), so restarts don't lose anything and generation stays serialized across instances. A background sweep reclaims stale sessions and crashed leases.
+
+Generation is queued, not blocking. `/generate` (after the password) enqueues a job and replies immediately with your position in line; a pool of `WORKER_COUNT` background workers drains the queue, so concurrent users are processed with bounded parallelism instead of hammering the AI provider. The queue is **in-memory** — a restart drops queued jobs, notifies the affected users, and resets those sessions to idle (they can re-run `/generate`).
+
+Scaling is a wait-time dial, not a wall. With `W` workers, the last user waits roughly `total_receipts / W × time_per_receipt`. Raise `WORKER_COUNT` (up to your AI provider's rate limit) to cut wait time; the provider pool (`AI_PROVIDER=pool`) adds a second lane. The system degrades gracefully under load — it gets slower, never breaks.
+
+Concurrency is bounded by `WORKER_COUNT × AI_CONCURRENCY` = max concurrent AI calls (default 2 × 1 = 2). These are the only two concurrency dials; don't add a third. The per-user processing lease is **crash recovery**, not multi-instance support: if the process dies mid-generation, the lease expiry is what lets the next start reclaim the stuck `PROCESSING` session. The bot is **single-instance by design** (Telegram long-polling can't have two pollers on one token); scaling out would require webhooks + a shared temp dir + a distributed queue.
 
 There's also an audit ledger. Every accepted and failed receipt lands in SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with the delivery outcome recorded. Reimbursements keep a persistent trail no matter how often the bot restarts.
 
@@ -46,7 +54,9 @@ python -m app.main         # start long polling
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot |
 | `ALLOWED_CHAT_IDS` | Optional comma-separated chat ID allow-list |
 | `BOT_PASSWORD` | Password required before generating a report |
-| `AI_PROVIDER` | `openai` or `ollama` |
+| `AI_PROVIDER` | `openai`, `ollama`, or `pool` (both at once) |
+| `AI_POOL_STRATEGY` | Pool strategy: `round_robin` (both lanes used) or `priority` (primary first, fallback on failure/low-confidence) (default `round_robin`) |
+| `AI_POOL_PRIMARY` | Primary provider for `priority` strategy: `openai` or `ollama` (default `ollama`) |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI credentials |
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Ollama vision endpoint + model |
 | `MAX_RECEIPTS` | Max receipts per report (default 20) |
@@ -57,7 +67,8 @@ python -m app.main         # start long polling
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `AI_REQUEST_DELAY_SECONDS` | Pause between consecutive receipts; 0 disables (default 1.0) |
-| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1, one at a time) |
+| `AI_CONCURRENCY` | Max receipts extracted in parallel within one batch (default 1, one at a time) |
+| `WORKER_COUNT` | Background workers draining the job queue; the global cap on concurrent batches (default 2) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 600) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |

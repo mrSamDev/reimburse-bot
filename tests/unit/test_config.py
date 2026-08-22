@@ -39,6 +39,7 @@ def test_defaults():
     assert cfg.ai_concurrency == 1
     assert cfg.ai_request_delay_seconds == 1.0
     assert cfg.image_max_edge == 1024
+    assert cfg.worker_count == 2
 
 
 def test_default_provider_openai_requires_key_at_runtime():
@@ -70,7 +71,47 @@ def test_unsupported_provider_rejected():
 
 
 def test_supported_providers_enum():
-    assert SUPPORTED_PROVIDERS == {"openai", "ollama"}
+    assert SUPPORTED_PROVIDERS == {"openai", "ollama", "pool"}
+
+
+def test_pool_requires_both_keys():
+    with pytest.raises(ValueError):
+        Config(ai_provider="pool", openai_api_key="k", ollama_base_url="").validate_operational()
+    with pytest.raises(ValueError):
+        Config(ai_provider="pool", openai_api_key="", ollama_base_url="http://x").validate_operational()
+
+
+def test_pool_with_both_keys_passes():
+    cfg = Config(ai_provider="pool", openai_api_key="k", ollama_base_url="http://x")
+    assert cfg.validate_operational() is cfg
+
+
+def test_pool_strategy_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_POOL_STRATEGY", raising=False)
+    assert load_config(strict=False).ai_pool_strategy == "round_robin"
+
+    env = tmp_path / ".env"
+    env.write_text("AI_POOL_STRATEGY=priority\n")
+    assert load_config(env_file=env, strict=False).ai_pool_strategy == "priority"
+
+
+def test_pool_strategy_invalid_rejected():
+    with pytest.raises(ValueError):
+        Config(ai_pool_strategy="random")
+
+
+def test_pool_primary_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_POOL_PRIMARY", raising=False)
+    assert load_config(strict=False).ai_pool_primary == "ollama"
+
+    env = tmp_path / ".env"
+    env.write_text("AI_POOL_PRIMARY=openai\n")
+    assert load_config(env_file=env, strict=False).ai_pool_primary == "openai"
+
+
+def test_pool_primary_invalid_rejected():
+    with pytest.raises(ValueError):
+        Config(ai_pool_primary="claude")
 
 
 def test_allowed_user_ids_parsing_comma_string():
@@ -157,6 +198,65 @@ def test_ai_max_calls_per_run_default_and_env(tmp_path, monkeypatch):
 def test_ai_max_calls_per_run_must_be_positive(monkeypatch):
     _clear_env()
     monkeypatch.setenv("AI_MAX_CALLS_PER_RUN", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
+
+
+def test_worker_count_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("WORKER_COUNT", raising=False)
+    assert load_config(strict=False).worker_count == 2
+
+    env = tmp_path / ".env"
+    env.write_text("WORKER_COUNT=4\n")
+    assert load_config(env_file=env, strict=False).worker_count == 4
+
+
+def test_worker_count_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("WORKER_COUNT", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
+
+
+def test_max_concurrent_ai_calls_default():
+    assert Config().max_concurrent_ai_calls == 8
+
+
+def test_max_concurrent_ai_calls_must_be_positive():
+    with pytest.raises(ValueError):
+        Config(max_concurrent_ai_calls=0)
+
+
+def test_effective_concurrency_exceeds_cap_rejected():
+    """The real concurrent AI call count is ``worker_count * ai_concurrency``;
+    a product above ``max_concurrent_ai_calls`` must fail fast at startup."""
+    with pytest.raises(ValueError, match="exceeds max_concurrent_ai_calls"):
+        Config(
+            ai_provider="ollama", ollama_base_url="http://x",
+            worker_count=4, ai_concurrency=4, max_concurrent_ai_calls=8,
+        ).validate_operational()
+
+
+def test_effective_concurrency_within_cap_passes():
+    cfg = Config(
+        ai_provider="ollama", ollama_base_url="http://x",
+        worker_count=2, ai_concurrency=2, max_concurrent_ai_calls=8,
+    )
+    assert cfg.validate_operational() is cfg
+
+
+def test_max_queue_size_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAX_QUEUE_SIZE", raising=False)
+    assert load_config(strict=False).max_queue_size == 50
+
+    env = tmp_path / ".env"
+    env.write_text("MAX_QUEUE_SIZE=5\n")
+    assert load_config(env_file=env, strict=False).max_queue_size == 5
+
+
+def test_max_queue_size_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("MAX_QUEUE_SIZE", "0")
     with pytest.raises((ConfigError, ValueError)):
         load_config(strict=False)
 
