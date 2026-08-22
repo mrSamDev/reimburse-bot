@@ -218,6 +218,33 @@ def test_worker_count_must_be_positive(monkeypatch):
         load_config(strict=False)
 
 
+def test_max_concurrent_ai_calls_default():
+    assert Config().max_concurrent_ai_calls == 8
+
+
+def test_max_concurrent_ai_calls_must_be_positive():
+    with pytest.raises(ValueError):
+        Config(max_concurrent_ai_calls=0)
+
+
+def test_effective_concurrency_exceeds_cap_rejected():
+    """The real concurrent AI call count is ``worker_count * ai_concurrency``;
+    a product above ``max_concurrent_ai_calls`` must fail fast at startup."""
+    with pytest.raises(ValueError, match="exceeds max_concurrent_ai_calls"):
+        Config(
+            ai_provider="ollama", ollama_base_url="http://x",
+            worker_count=4, ai_concurrency=4, max_concurrent_ai_calls=8,
+        ).validate_operational()
+
+
+def test_effective_concurrency_within_cap_passes():
+    cfg = Config(
+        ai_provider="ollama", ollama_base_url="http://x",
+        worker_count=2, ai_concurrency=2, max_concurrent_ai_calls=8,
+    )
+    assert cfg.validate_operational() is cfg
+
+
 def test_max_queue_size_default_and_env(tmp_path, monkeypatch):
     monkeypatch.delenv("MAX_QUEUE_SIZE", raising=False)
     assert load_config(strict=False).max_queue_size == 50

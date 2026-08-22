@@ -1,4 +1,4 @@
-"""SQLite-backed per-user session store (multi-process safe)."""
+"""SQLite-backed per-user session store (single-process)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,13 @@ from app.bot.states import BotState
 from app.models.session import Session
 from app.services.backup_service import backup_database
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _MIGRATIONS: dict[int, str] = {
+    # Migration 2 added lease_expiry for the now-removed cross-process lease;
+    # migration 5 drops it (single-process refactor). Both are kept so existing
+    # DBs at any intermediate version migrate correctly. A fresh DB does a
+    # harmless add-then-drop.
     1: """
     CREATE TABLE IF NOT EXISTS sessions (
         user_id INTEGER PRIMARY KEY,
@@ -35,6 +39,9 @@ _MIGRATIONS: dict[int, str] = {
     4: """
     CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
     """,
+    5: """
+    ALTER TABLE sessions DROP COLUMN lease_expiry;
+    """,
 }
 
 _COLUMNS = ("user_id", "chat_id", "state", "receipt_file_ids",
@@ -48,21 +55,22 @@ def _utc_now() -> str:
 class SessionStore:
     """Durable, per-user session registry backed by SQLite (WAL).
 
-    Repository-style: :meth:`get` returns a detached ``Session`` snapshot that
-    callers mutate and persist via :meth:`save`. Generation is serialized per
-    user with :meth:`try_acquire_processing` (atomic, multi-instance safe).
+    Single-process: the ``flock`` singleton in ``main`` prevents a second
+    instance from polling the same token, so there is no cross-process
+    coordination here. Repository-style: :meth:`get` returns a detached
+    ``Session`` snapshot that callers mutate and persist via :meth:`save`.
+    Generation is serialized per user with :meth:`try_acquire_processing`,
+    which atomically claims a ``processing`` flag.
     """
 
     def __init__(
         self,
         db_path: str | Path,
         ttl_seconds: int = 1800,
-        lease_ttl_seconds: int = 120,
     ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ttl = ttl_seconds
-        self._lease_ttl = lease_ttl_seconds
         self._migrate()
 
     def _connect(self) -> sqlite3.Connection:
@@ -127,7 +135,7 @@ class SessionStore:
         conn = self._connect()
         try:
             # ``receipt_file_ids`` mutated only via atomic add/clear so save()
-            # never clobbers a concurrent append (cross-process lost-update fix).
+            # never clobbers a concurrent append (atomic-append lost-update fix).
             conn.execute(
                 f"INSERT INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)}) "
@@ -225,40 +233,46 @@ class SessionStore:
     async def clear(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_clear, user_id)
 
-    def _op_reset_queued(self) -> int:
-        """Reset any session stuck in QUEUED back to IDLE (sync).
+    def _op_reset_stale(self) -> int:
+        """Startup-only crash recovery (sync).
 
-        The job queue is in-memory, so after a restart a QUEUED session has no
-        worker behind it; reset it so the user can re-run /generate.
+        Clears ALL processing flags and resets QUEUED/PROCESSING to IDLE. Do
+        NOT call while workers are running — it would clear a live job's
+        processing flag. Safe only because ``notify_queued_lost`` runs in
+        ``_post_init`` before ``start_workers()``.
         """
         conn = self._connect()
         try:
+            conn.execute("UPDATE sessions SET processing = 0 WHERE processing = 1")
             cur = conn.execute(
-                "UPDATE sessions SET state = ? WHERE state = ?",
-                (BotState.IDLE.value, BotState.QUEUED.value),
+                "UPDATE sessions SET state = ? WHERE state IN (?, ?)",
+                (BotState.IDLE.value, BotState.QUEUED.value, BotState.PROCESSING.value),
             )
             conn.commit()
             return cur.rowcount
         finally:
             conn.close()
 
-    async def reset_queued(self) -> int:
-        return await asyncio.to_thread(self._op_reset_queued)
+    async def reset_stale(self) -> int:
+        return await asyncio.to_thread(self._op_reset_stale)
 
-    def _op_get_queued(self) -> list[tuple[int, int]]:
-        """Return ``(user_id, chat_id)`` for sessions currently in QUEUED (sync)."""
+    def _op_get_stale(self) -> list[tuple[int, int]]:
+        """Return ``(user_id, chat_id)`` for sessions stuck in QUEUED or
+        PROCESSING, or with a stuck processing flag (a crash between the claim
+        and the state save), so the user is notified their job was lost (sync)."""
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT user_id, chat_id FROM sessions WHERE state = ?",
-                (BotState.QUEUED.value,),
+                "SELECT user_id, chat_id FROM sessions "
+                "WHERE state IN (?, ?) OR processing = 1",
+                (BotState.QUEUED.value, BotState.PROCESSING.value),
             ).fetchall()
             return [(r["user_id"], r["chat_id"]) for r in rows]
         finally:
             conn.close()
 
-    async def get_queued(self) -> list[tuple[int, int]]:
-        return await asyncio.to_thread(self._op_get_queued)
+    async def get_stale(self) -> list[tuple[int, int]]:
+        return await asyncio.to_thread(self._op_get_stale)
 
     def _op_purge_expired(self) -> int:
         """Remove sessions idle past the TTL (sync).
@@ -283,55 +297,30 @@ class SessionStore:
         return await asyncio.to_thread(self._op_purge_expired)
 
     def _op_sweep(self) -> dict[str, int]:
-        """Reclaim abandoned leases and purge expired sessions (sync)."""
-        conn = self._connect()
-        now_iso = _utc_now()
-        try:
-            reclaimed = self._reclaim_expired_leases(conn, now_iso)
-            conn.commit()
-        finally:
-            conn.close()
+        """Purge expired sessions (sync).
+
+        Single-process: there is no cross-process lease to reclaim, so the sweep
+        only removes sessions idle past the TTL.
+        """
         purged = self._op_purge_expired()
-        return {"reclaimed": reclaimed, "purged": purged}
+        return {"purged": purged}
 
     async def sweep(self) -> dict[str, int]:
         return await asyncio.to_thread(self._op_sweep)
 
-    def _reclaim_expired_leases(
-        self, conn: sqlite3.Connection, now_iso: str, user_id: int | None = None
-    ) -> int:
-        """Reset any abandoned (already-expired) processing lease."""
-        if user_id is None:
-            cur = conn.execute(
-                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
-                "WHERE processing = 1 AND lease_expiry IS NOT NULL AND lease_expiry < ?",
-                (now_iso,),
-            )
-        else:
-            cur = conn.execute(
-                "UPDATE sessions SET processing = 0, lease_expiry = NULL "
-                "WHERE user_id = ? AND processing = 1 "
-                "AND lease_expiry IS NOT NULL AND lease_expiry < ?",
-                (user_id, now_iso),
-            )
-        return cur.rowcount
-
     def _op_try_acquire_processing(self, user_id: int) -> bool:
         """Atomically claim the per-user processing slot (sync)."""
-        lease = _utc_now()
-        expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
+        now = _utc_now()
         conn = self._connect()
         try:
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
                 f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
-                (user_id, user_id, BotState.IDLE.value, json.dumps([]), "", lease, lease),
+                (user_id, user_id, BotState.IDLE.value, json.dumps([]), "", now, now),
             )
-            self._reclaim_expired_leases(conn, lease, user_id)
             cur = conn.execute(
-                "UPDATE sessions SET processing = 1, lease_expiry = ? "
-                "WHERE user_id = ? AND processing = 0",
-                (expiry, user_id),
+                "UPDATE sessions SET processing = 1 WHERE user_id = ? AND processing = 0",
+                (user_id,),
             )
             conn.commit()
             return cur.rowcount == 1
@@ -345,7 +334,7 @@ class SessionStore:
         conn = self._connect()
         try:
             conn.execute(
-                "UPDATE sessions SET processing = 0, lease_expiry = NULL WHERE user_id = ?",
+                "UPDATE sessions SET processing = 0 WHERE user_id = ?",
                 (user_id,),
             )
             conn.commit()
@@ -354,24 +343,6 @@ class SessionStore:
 
     async def release_processing(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_release_processing, user_id)
-
-    def _op_renew_processing_lease(self, user_id: int) -> bool:
-        """Renew a live lease's expiry (heartbeat) so a long run isn't reclaimed."""
-        expiry = (datetime.now(timezone.utc) + timedelta(seconds=self._lease_ttl)).isoformat()
-        conn = self._connect()
-        try:
-            cur = conn.execute(
-                "UPDATE sessions SET lease_expiry = ? "
-                "WHERE user_id = ? AND processing = 1",
-                (expiry, user_id),
-            )
-            conn.commit()
-            return cur.rowcount == 1
-        finally:
-            conn.close()
-
-    async def renew_processing_lease(self, user_id: int) -> bool:
-        return await asyncio.to_thread(self._op_renew_processing_lease, user_id)
 
     def _op_is_processing(self, user_id: int) -> bool:
         conn = self._connect()

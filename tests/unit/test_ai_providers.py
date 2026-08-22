@@ -114,6 +114,79 @@ def test_openai_returns_unparseable_raises(monkeypatch, tmp_path):
         provider.extract_receipt(img)
 
 
+def test_openai_provider_maps_rate_limit(monkeypatch, tmp_path):
+    """An HTTP 429 from OpenAI must surface as AIRateLimitError with the parsed
+    Retry-After and error kind, so the shared rate-limit backoff applies."""
+    import httpx
+    import openai
+
+    from app.ai.base import AIRateLimitError
+
+    img = make_image(tmp_path / "r.jpg", "JPEG")
+    resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+    resp.headers["retry-after"] = "0.5"
+    err = openai.RateLimitError("rate limited", response=resp, body=None)
+    err.type = "rate_limit_exceeded"
+
+    provider = OpenAIProvider(_cfg_openai())
+    provider._client = _FakeClient([err])
+    with pytest.raises(AIRateLimitError) as excinfo:
+        provider.extract_receipt(img)
+    assert excinfo.value.retry_after == 0.5
+    assert excinfo.value.kind == "rate_limit_exceeded"
+
+
+def test_openai_provider_generic_error_wraps(monkeypatch, tmp_path):
+    """A non-rate-limit transport failure must surface as AIProviderError."""
+    img = make_image(tmp_path / "r.jpg", "JPEG")
+    provider = OpenAIProvider(_cfg_openai())
+    provider._client = _FakeClient([RuntimeError("connection reset")])
+    with pytest.raises(AIProviderError, match="connection reset"):
+        provider.extract_receipt(img)
+
+
+def test_retry_after_header_without_response():
+    """_retry_after_header returns None when the error has no response object."""
+    from app.ai.openai_provider import _retry_after_header
+
+    class _BareError(Exception):
+        pass
+
+    assert _retry_after_header(_BareError("boom")) is None
+
+
+def test_parse_retry_after_none():
+    from app.ai.openai_provider import _parse_retry_after
+
+    assert _parse_retry_after(None) is None
+
+
+def test_parse_retry_after_http_date():
+    from datetime import datetime, timedelta, timezone
+
+    from app.ai.openai_provider import _parse_retry_after
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=30)
+    date_str = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    seconds = _parse_retry_after(date_str)
+    assert seconds is not None
+    assert 0 <= seconds <= 60
+
+
+def test_parse_retry_after_invalid_returns_none():
+    from app.ai.openai_provider import _parse_retry_after
+
+    # Not a float and not a parseable HTTP date -> None.
+    assert _parse_retry_after("garbage-not-a-date") is None
+
+
+def test_extract_json_non_object_raises():
+    from app.ai.openai_provider import _extract_json
+
+    with pytest.raises(AIProviderError):
+        _extract_json('[1, 2, 3]')
+
+
 def test_ollama_provider_uses_openai_compatible_client(monkeypatch, tmp_path):
     img = make_image(tmp_path / "r.jpg", "JPEG")
     client = _FakeClient([_FakeCompletion('{"merchant_name":"Bolt","total":73}')])

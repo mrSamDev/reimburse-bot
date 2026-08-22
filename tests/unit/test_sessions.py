@@ -173,28 +173,42 @@ async def test_persists_across_store_instances(tmp_path):
     assert (await s2.get(5)).receipt_file_ids == ["f1"]
 
 
-async def test_reset_queued_returns_to_idle(tmp_path):
+async def test_reset_stale_returns_to_idle(tmp_path):
     store = _store(tmp_path)
     s = await store.get(5)
     s.state = BotState.QUEUED
     await store.save(s)
     assert (await store.get(5)).state == BotState.QUEUED
-    assert await store.reset_queued() == 1
+    assert await store.reset_stale() == 1
     assert (await store.get(5)).state == BotState.IDLE
 
 
-async def test_reset_queued_leaves_other_states_alone(tmp_path):
+async def test_reset_stale_resets_queued_and_processing(tmp_path):
     store = _store(tmp_path)
-    for uid, state in [(1, BotState.PROCESSING), (2, BotState.COLLECTING), (3, BotState.IDLE)]:
+    for uid, state in [
+        (1, BotState.PROCESSING),
+        (2, BotState.QUEUED),
+        (3, BotState.COLLECTING),
+        (4, BotState.IDLE),
+    ]:
         s = await store.get(uid)
         s.state = state
         await store.save(s)
-    assert await store.reset_queued() == 0
-    assert (await store.get(1)).state == BotState.PROCESSING
-    assert (await store.get(2)).state == BotState.COLLECTING
+    assert await store.reset_stale() == 2  # PROCESSING + QUEUED
+    assert (await store.get(1)).state == BotState.IDLE
+    assert (await store.get(2)).state == BotState.IDLE
+    assert (await store.get(3)).state == BotState.COLLECTING
+    assert (await store.get(4)).state == BotState.IDLE
 
 
-async def test_get_queued_returns_queued_sessions(tmp_path):
+async def test_reset_stale_clears_processing_flag(tmp_path):
+    store = _store(tmp_path)
+    assert await store.try_acquire_processing(1) is True
+    await store.reset_stale()
+    assert await store.is_processing(1) is False
+
+
+async def test_get_stale_returns_queued_and_processing(tmp_path):
     store = _store(tmp_path)
     s1 = await store.get(1)
     s1.state = BotState.QUEUED
@@ -205,8 +219,19 @@ async def test_get_queued_returns_queued_sessions(tmp_path):
     s3 = await store.get(3)
     s3.state = BotState.QUEUED
     await store.save(s3)
-    queued = await store.get_queued()
-    assert queued == [(1, 1), (3, 3)]  # (user_id, chat_id) for QUEUED only
+    stale = await store.get_stale()
+    assert stale == [(1, 1), (2, 2), (3, 3)]  # (user_id, chat_id) for QUEUED + PROCESSING
+
+
+async def test_get_stale_returns_processing_flag_sessions(tmp_path):
+    """A crash between try_acquire_processing and the state save leaves
+    state=IDLE but processing=1; get_stale must still return it so the user is
+    notified their job was lost (closes the get_stale/reset_stale asymmetry)."""
+    store = _store(tmp_path)
+    assert await store.try_acquire_processing(1) is True
+    # Simulate the crash: processing flag set, but state never advanced.
+    stale = await store.get_stale()
+    assert stale == [(1, 1)]
 
 
 # ---- TTL ------------------------------------------------------------------
@@ -287,38 +312,7 @@ async def test_try_acquire_creates_row(tmp_path):
     assert await store.count() == 1
 
 
-def _force_lease_expiry(tmp_path, user_id: int) -> None:
-    import sqlite3
-
-    conn = sqlite3.connect(str(_db(tmp_path)))
-    conn.execute(
-        "UPDATE sessions SET lease_expiry = ? WHERE user_id = ?",
-        ("2000-01-01T00:00:00+00:00", user_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-async def test_stale_lease_reclaimable_by_other_instance(tmp_path):
-    a = _store(tmp_path)
-    b = _store(tmp_path)
-    assert await a.try_acquire_processing(1) is True
-    # Simulate a crash: the lease is left set but long expired.
-    _force_lease_expiry(tmp_path, 1)
-    # Another instance must be able to reclaim the abandoned lease.
-    assert await b.try_acquire_processing(1) is True
-    assert await a.try_acquire_processing(1) is False  # now held by b
-
-
-async def test_live_lease_not_reacquirable(tmp_path):
-    a = _store(tmp_path)
-    b = _store(tmp_path)
-    assert await a.try_acquire_processing(1) is True
-    # A still-live lease (not expired) blocks other instances.
-    assert await b.try_acquire_processing(1) is False
-
-
-async def test_release_clears_processing_and_lease(tmp_path):
+async def test_release_clears_processing(tmp_path):
     store = _store(tmp_path)
     assert await store.try_acquire_processing(1) is True
     await store.release_processing(1)
@@ -326,7 +320,7 @@ async def test_release_clears_processing_and_lease(tmp_path):
     assert await store.try_acquire_processing(1) is True
 
 
-async def test_is_processing_reflects_lease(tmp_path):
+async def test_is_processing_reflects_flag(tmp_path):
     store = _store(tmp_path)
     assert await store.is_processing(1) is False
     await store.try_acquire_processing(1)
@@ -335,59 +329,13 @@ async def test_is_processing_reflects_lease(tmp_path):
     assert await store.is_processing(1) is False
 
 
-# ---- Cross-process lease renewal (heartbeat) -----------------------------
-
-async def test_renew_lease_returns_true_while_processing(tmp_path):
-    store = _store(tmp_path, lease_ttl_seconds=120)
-    await store.try_acquire_processing(1)
-    assert await store.renew_processing_lease(1) is True
-
-
-async def test_renew_lease_returns_false_when_not_processing(tmp_path):
-    store = _store(tmp_path, lease_ttl_seconds=120)
-    # No lease held -> nothing to renew.
-    assert await store.renew_processing_lease(1) is False
-
-
-async def test_renew_lease_extends_expired_lease_and_blocks_reclaim(tmp_path):
-    """A heartbeat must re-arm an already-expired lease so a rival instance
-    cannot reclaim the slot mid-run (regression for the lease-vs-runtime race)."""
-    a = _store(tmp_path, lease_ttl_seconds=120)
-    b = _store(tmp_path, lease_ttl_seconds=120)
-    assert await a.try_acquire_processing(1) is True
-    # Simulate time passing past the TTL mid-run (crashed-looking lease).
-    _force_lease_expiry(tmp_path, 1)
-    # The heartbeat renews it, pushing the expiry forward again.
-    assert await a.renew_processing_lease(1) is True
-    # The lease is live again: another instance must NOT reclaim it.
-    assert await b.try_acquire_processing(1) is False
-
-
-async def test_renew_lease_after_release_is_noop(tmp_path):
-    store = _store(tmp_path, lease_ttl_seconds=120)
-    await store.try_acquire_processing(1)
-    await store.release_processing(1)
-    # After a clean release the heartbeat has nothing to renew and stops.
-    assert await store.renew_processing_lease(1) is False
-
-
-async def test_sweep_reclaims_stale_lease(tmp_path):
-    store = _store(tmp_path)
-    await store.try_acquire_processing(1)
-    _force_lease_expiry(tmp_path, 1)  # crashed-generation lease now expired
-    res = await store.sweep()
-    assert res["reclaimed"] >= 1
-    # After sweep the abandoned slot is re-acquirable.
-    assert await store.try_acquire_processing(1) is True
-
-
-async def test_regression_save_preserves_processing_lease(tmp_path):
-    """A handler's ``save()`` during generation must NOT reset the DB lease (Bug A).
+async def test_regression_save_preserves_processing_flag(tmp_path):
+    """A handler's ``save()`` during generation must NOT reset the processing flag.
 
     Every handler ends in ``sessions.save(session)``. While a generation holds
-    the per-user processing lease (``processing=1``), a concurrent command or
-    message triggers ``save()``; that save must leave the lease untouched or a
-    second instance can steal it (double extraction / double billing).
+    the per-user processing slot (``processing=1``), a concurrent command or
+    message triggers ``save()``; that save must leave the flag untouched or a
+    second job could double-process (double extraction / double billing).
     """
     store = _store(tmp_path)
     assert await store.try_acquire_processing(5) is True
@@ -397,11 +345,11 @@ async def test_regression_save_preserves_processing_lease(tmp_path):
     s.chat_id = 999
     await store.save(s)
 
-    # The lease must survive the save.
+    # The processing flag must survive the save.
     assert await store.is_processing(5) is True
-    # A second instance must NOT be able to steal the slot.
+    # A second job must NOT be able to steal the slot.
     assert await store.try_acquire_processing(5) is False
-    # Non-lease fields are still persisted normally.
+    # Non-flag fields are still persisted normally.
     assert (await store.get(5)).chat_id == 999
 
 
@@ -433,12 +381,15 @@ async def test_sweep_purges_expired_sessions(tmp_path):
     assert await store.count() == 1
 
 
-async def test_sweep_does_not_reclaim_live_lease(tmp_path):
+async def test_sweep_does_not_reclaim_processing(tmp_path):
+    """Single-process invariant: the maintenance sweep must never steal a
+    processing flag. With the flock singleton making multi-instance impossible,
+    there is no lease to reclaim, so a running job's flag must survive a sweep.
+    """
     store = _store(tmp_path)
-    await store.try_acquire_processing(1)
-    res = await store.sweep()
-    assert res["reclaimed"] == 0
-    assert await store.try_acquire_processing(1) is False  # still held
+    assert await store.try_acquire_processing(1) is True
+    await store.sweep()
+    assert await store.is_processing(1) is True
 
 
 async def test_store_write_does_not_block_event_loop(tmp_path):
@@ -473,24 +424,22 @@ async def test_store_write_does_not_block_event_loop(tmp_path):
 async def test_maintenance_loop_runs_sweep(tmp_path):
     from app.main import _maintenance_loop
 
-    store = _store(tmp_path)
-    await store.try_acquire_processing(1)
-    _force_lease_expiry(tmp_path, 1)
+    store = _store(tmp_path, ttl_seconds=30)
+    past = datetime.now(timezone.utc) - timedelta(seconds=31)
+    await store.save(Session(user_id=1, chat_id=1, updated_at=past, created_at=past))
     task = asyncio.create_task(_maintenance_loop(store.sweep, 0.01))
     await asyncio.sleep(0.06)  # let several iterations run
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    # The abandoned lease was reclaimed by the background loop.
-    assert await store.try_acquire_processing(1) is True
+    # The background loop purged the expired session.
+    assert await store.count() == 0
 
 
 async def test_post_init_starts_and_cancels_maintenance_task(tmp_path):
     from app.main import _make_post_init
 
     store = _store(tmp_path)
-    await store.try_acquire_processing(1)
-    _force_lease_expiry(tmp_path, 1)
 
     class _FakeBot:
         def __init__(self):
@@ -519,11 +468,44 @@ async def test_post_init_starts_and_cancels_maintenance_task(tmp_path):
     assert app.post_shutdown is not None
     assert bot.started is True
     await asyncio.sleep(0.06)  # let the task run its sweep
-    # The abandoned lease was reclaimed by the scheduled task.
-    assert await store.try_acquire_processing(1) is True
     # Shutdown cancels and reaps the task cleanly, and stops the workers.
     await app.post_shutdown(app)
     assert bot.stopped is True
+
+
+async def test_post_init_notifies_before_starting_workers(tmp_path):
+    """Lock the startup ordering: notify_queued_lost (which runs reset_stale)
+    must run before start_workers, so reset_stale never clears a live job's
+    processing flag."""
+    from app.main import _make_post_init
+
+    store = _store(tmp_path)
+
+    class _FakeBot:
+        def __init__(self):
+            self.locks = type("L", (), {"evict_idle": lambda idle: 0})()
+            self.calls = []
+
+        async def notify_queued_lost(self):
+            self.calls.append("notify")
+            return 0
+
+        def start_workers(self):
+            self.calls.append("start")
+
+        async def stop_workers(self):
+            pass
+
+    class _FakeApp:
+        def __init__(self):
+            self.post_init = None
+            self.post_shutdown = None
+
+    bot = _FakeBot()
+    app = _FakeApp()
+    await _make_post_init(store, 0.01, bot)(app)
+    assert bot.calls == ["notify", "start"]  # reset_stale runs before workers
+    await app.post_shutdown(app)
 
 
 

@@ -22,8 +22,9 @@ def test_build_application_constructs_and_registers_handlers(tmp_path):
     # Exercises the full PTB wiring (including filters). This guards against
     # runtime-only breakage (e.g. an invalid filter name) that unit tests of the
     # handlers never reach because they construct ReimbursementBot directly.
-    app = build_application(_cfg(tmp_path))
+    app, bot = build_application(_cfg(tmp_path))
     assert isinstance(app, Application)
+    assert bot is not None
     # MessageHandler + 6 command handlers registered.
     assert len(app.handlers) == 1
     assert len(app.handlers[0]) == 7

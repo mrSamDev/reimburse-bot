@@ -34,7 +34,7 @@ def sweep_orphaned_requests(
     temp filesystem. Returns how many directories were removed.
 
     Only directories whose mtime is older than ``age_seconds`` are removed, so
-    a fresh in-flight request (e.g. from another instance sharing ``TEMP_DIR``)
+    a fresh in-flight request (e.g. from a slow worker still writing its dir)
     is never destroyed. ``age_seconds=0`` removes everything (the historical
     behavior, safe for a per-container tmpfs).
     """

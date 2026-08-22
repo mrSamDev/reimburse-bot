@@ -85,3 +85,66 @@ async def test_stop_cancels_workers():
     q.enqueue(Job(user_id=1, chat_id=1, file_ids=[]))
     await started.wait()
     await q.stop()  # must return without hanging
+
+
+async def test_stats_reports_in_flight_and_queued():
+    """``in_flight`` counts jobs picked up but not finished; ``queued`` counts
+    jobs still waiting. Regression test for the always-zero ``in_flight`` bug.
+    """
+    q = JobQueue(worker_count=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(job):
+        started.set()
+        await release.wait()
+
+    q.start(process)
+    q.enqueue(Job(user_id=1, chat_id=1, file_ids=[]))
+    await started.wait()
+
+    s = q.stats()
+    assert s["in_flight"] == 1
+    assert s["queued"] == 0
+
+    q.enqueue(Job(user_id=2, chat_id=2, file_ids=[]))
+    s = q.stats()
+    assert s["in_flight"] == 1
+    assert s["queued"] == 1
+
+    release.set()
+    await q.join()
+    await q.stop()
+
+    s = q.stats()
+    assert s["in_flight"] == 0
+    assert s["queued"] == 0
+
+
+async def test_stats_est_wait_uses_batch_time_and_whole_seconds():
+    from app.utils import metrics
+
+    metrics.reset_metrics()
+    # One batch took 10s; one receipt took 1s. The queue wait must use the
+    # batch time (the unit of queueing), not the per-receipt time, and must be
+    # a whole number (honest granularity, not false precision).
+    metrics.observe("batch_processing_seconds", 10.0)
+    metrics.observe("receipt_processing_seconds", 1.0)
+
+    q = JobQueue(worker_count=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(job):
+        started.set()
+        await release.wait()
+
+    q.start(process)
+    q.enqueue(Job(user_id=1, chat_id=1, file_ids=[]))
+    await started.wait()
+
+    s = q.stats()
+    assert s["est_wait_seconds"] == 10  # batch time, whole seconds (not 1, not 10.0)
+    release.set()
+    await q.join()
+    await q.stop()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 
@@ -75,24 +74,25 @@ class ReimbursementBot:
         await self.queue.stop()
 
     async def notify_queued_lost(self) -> int:
-        """Notify users whose queued jobs were lost (in-memory queue reset on
-        restart) and reset those sessions to IDLE so they can re-run /generate.
+        """Notify users whose queued or in-flight jobs were lost (in-memory
+        queue reset on restart) and reset those sessions to IDLE so they can
+        re-run /generate.
 
         Returns how many users were notified. Best-effort per user: a send
         failure is logged and does not stop the reset.
         """
-        queued = await self.sessions.get_queued()
-        if not queued:
+        stale = await self.sessions.get_stale()
+        if not stale:
             return 0
-        for user_id, chat_id in queued:
+        for user_id, chat_id in stale:
             try:
                 await self.telegram.send_message(chat_id, msg.QUEUE_LOST)
             except Exception:
                 logger.exception(
                     "failed to notify user %s of lost queued job", user_id
                 )
-        await self.sessions.reset_queued()
-        return len(queued)
+        await self.sessions.reset_stale()
+        return len(stale)
 
     def _authorized(self, update):
         user = update.effective_user
@@ -138,7 +138,7 @@ class ReimbursementBot:
         state, reply = handle_clear(session)  # clears receipts on the detached copy
         session.state = state
         session.report_title = ""
-        await self.sessions.clear_receipts(user.id)  # atomic cross-process clear
+        await self.sessions.clear_receipts(user.id)  # atomic SQL clear
         await self.sessions.save(session)
         await self._reply(update, reply)
 
@@ -188,8 +188,7 @@ class ReimbursementBot:
         session.chat_id = chat.id
 
         if session.state in (BotState.PROCESSING, BotState.QUEUED):
-            # Generation in flight or queued; reject input so it isn't misread
-            # as password/heading.
+            # Reject input while a job is in flight or queued.
             await self._reply(update, msg.BUSY)
             return
 
@@ -218,7 +217,7 @@ class ReimbursementBot:
         if state is not None:
             session.state = state
         if should_add:
-            # Atomic cross-process append (avoids get->mutate->upsert lost append).
+            # Atomic SQL append (avoids get->mutate->upsert lost append).
             if not await self.sessions.add_file_id(user.id, file_id):
                 session.state = BotState.COLLECTING
                 await self.sessions.save(session)
@@ -298,12 +297,12 @@ class ReimbursementBot:
         await self._reply(update, msg.QUEUED.format(position=position))
 
     async def _process_job(self, job: Job) -> None:
-        """Process one queued job: acquire the per-user lock + lease, run the
-        pipeline, deliver the PDF, then release everything.
+        """Process one queued job: acquire the per-user lock + processing slot,
+        run the pipeline, deliver the PDF, then release everything.
 
         Runs in a background worker, so it messages the user via ``chat_id``
-        rather than a PTB ``update``. The lease is always released in ``finally``
-        so a notification failure can never leak it.
+        rather than a PTB ``update``. The lock and processing flag are always
+        released in ``finally`` so a notification failure can never leak them.
         """
         if not await self.locks.acquire(job.user_id):
             await self._notify(job.chat_id, msg.BUSY)
@@ -313,10 +312,6 @@ class ReimbursementBot:
             await self._notify(job.chat_id, msg.BUSY)
             return
         request_id = uuid.uuid4().hex[:6]
-        # Heartbeat keeps the lease alive past its TTL so a rival can't double-process.
-        heartbeat = asyncio.get_running_loop().create_task(
-            self._renew_lease_loop(job.user_id)
-        )
         delivered = False
         session = None
         try:
@@ -354,33 +349,26 @@ class ReimbursementBot:
                         title=job.title,
                         on_progress=on_progress,
                     )
-                    session.state = BotState.IDLE
                 except ProcessingError:
                     await self._notify(
                         job.chat_id,
                         msg.ERROR_MESSAGE.format(request_id=request_id or "unknown"),
                     )
-                    session.state = BotState.IDLE
                 except Exception:
                     logger.exception("unhandled processing error")
                     await self._notify(
                         job.chat_id,
                         msg.ERROR_MESSAGE.format(request_id=request_id or "unknown"),
                     )
-                    session.state = BotState.IDLE
         finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
             self.locks.release(job.user_id)
             await self.sessions.release_processing(job.user_id)
             if session is not None:
+                # Single state-transition point: every outcome resets to IDLE.
                 session.state = BotState.IDLE
                 if delivered:
-                    # Clear staged receipts (atomic) only on confirmed delivery so a
-                    # failed send can be retried with /generate without re-uploading.
+                    # Clear staged receipts only on confirmed delivery so a failed
+                    # send is retryable without re-uploading (crash window may dup).
                     session.report_title = ""
                     session.receipt_file_ids = []
                     await self.sessions.clear_receipts(job.user_id)
@@ -394,20 +382,6 @@ class ReimbursementBot:
             await self.telegram.send_message(chat_id, text)
         except Exception as exc:  # pragma: no cover - best effort
             logger.warning("notify failed: %s", exc)
-
-    async def _renew_lease_loop(self, user_id: int) -> None:
-        """Heartbeat-renew the cross-process lease so a long run isn't reclaimed."""
-        interval = self.config.session_lease_ttl_seconds / 3.0
-        if interval <= 0:
-            interval = 1.0
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                renewed = await self.sessions.renew_processing_lease(user_id)
-                if not renewed:
-                    return  # lease already released -> nothing to renew
-            except Exception:
-                logger.exception("processing lease renewal failed")
 
     def _candidate_text(self, update) -> str:
         m = update.message

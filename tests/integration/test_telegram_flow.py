@@ -498,63 +498,6 @@ async def test_concurrent_message_during_generation_is_busy(tmp_path):
     await bot.stop_workers()
 
 
-async def test_lease_renewed_during_long_generation(tmp_path):
-    """A generation running longer than the lease TTL must renew the
-    cross-process lease (heartbeat) so a rival instance cannot double-process.
-
-    Regression for the lease-vs-runtime race: with a tiny lease TTL shorter than
-    the run, a second SessionStore (another process) must still be unable to
-    steal the slot while the run is in flight, and only re-acquire it after the
-    generation completes and releases the lease.
-    """
-    class _SlowProvider(FakeProvider):
-        def extract_receipt(self, image_path):
-            time.sleep(2.4)  # hold generation open past the tiny lease TTL
-            return super().extract_receipt(image_path)
-
-    config = Config(
-        telegram_token="t", allowed_user_ids="111", bot_password="secret",
-        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, ai_request_delay_seconds=0, ai_concurrency=1,
-        session_lease_ttl_seconds=1,  # shorter than the ~2.4s run
-        report_title="Heading Travel Expenses", report_period="July Expenses",
-    )
-    transport = FakeTransport()
-    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
-    security = SecurityService(config)
-    sessions = SessionStore(
-        db_path=tmp_path / "sessions.db",
-        ttl_seconds=1800, lease_ttl_seconds=1,
-    )
-    provider = _SlowProvider()
-    processing = ProcessingService(config, provider, telegram)
-    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
-    bot.start_workers()
-
-    await bot.start_command(_text_update("/start"), None)
-    await bot.message_handler(_photo_update("f1"), None)
-    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
-    await bot.message_handler(_text_update("July Expenses"), None)
-
-    gen_task = asyncio.create_task(bot.message_handler(_text_update("secret"), None))
-    # Wait until the generation has acquired the lease and started the slow run.
-    await asyncio.sleep(1.6)  # > lease_ttl (1s) without a heartbeat it'd be stale
-
-    # A rival instance must NOT reclaim the slot mid-run: the heartbeat renewed it.
-    rival = SessionStore(
-        db_path=tmp_path / "sessions.db",
-        ttl_seconds=1800, lease_ttl_seconds=1,
-    )
-    assert await rival.try_acquire_processing(111) is False
-
-    await gen_task
-    await bot.queue.join()
-    assert len(transport.sent_docs) == 1
-    # After completion the lease is released and re-acquirable.
-    assert await rival.try_acquire_processing(111) is True
-    await bot.stop_workers()
-
-
 async def test_delivery_failure_keeps_staged_receipts_for_retry(tmp_path):
     """A transient send failure must not drop the user's staged receipts; they
     should be able to retry /generate without re-uploading (and receipts are only
