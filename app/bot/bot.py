@@ -6,19 +6,10 @@ import logging
 
 from app.ai.base import ReceiptVisionProvider
 from app.bot import messages as msg
+from app.bot.handlers import CommandHandlersMixin
 from app.bot.job_processor import MAX_CAPTION_CHARS, JobProcessor, _clamp_caption
 from app.bot.locks import UserLockManager
-from app.bot.logic import (
-    handle_cancel,
-    handle_clear,
-    handle_generate,
-    handle_heading,
-    handle_help,
-    handle_password,
-    handle_receipt,
-    handle_start,
-    handle_status,
-)
+from app.bot.logic import handle_heading, handle_password, handle_receipt
 from app.bot.queue import Job, JobQueue, QueueFullError
 from app.bot.states import BotState
 from app.bot.throttle import PasswordThrottle
@@ -35,7 +26,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["ReimbursementBot", "MAX_CAPTION_CHARS", "_clamp_caption"]
 
 
-class ReimbursementBot:
+class ReimbursementBot(CommandHandlersMixin):
     """Holds dependencies and exposes PTB-compatible handler callables."""
 
     def __init__(
@@ -97,90 +88,6 @@ class ReimbursementBot:
                 )
         await self.sessions.reset_stale()
         return len(stale)
-
-    def _authorized(self, update):
-        user = update.effective_user
-        chat = update.effective_chat
-        if not self.security.is_authorized(user.id if user else None, chat.id if chat else None):
-            return None
-        return user, chat
-
-    async def start_command(self, update, context) -> None:
-        auth = self._authorized(update)
-        if auth is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        user, _ = auth
-        await self.sessions.set_chat_id(user.id, update.effective_chat.id)
-        state, reply = handle_start()
-        await self.sessions.set_state(user.id, state)
-        await self._reply(update, reply)
-
-    async def help_command(self, update, context) -> None:
-        if self._authorized(update) is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        await self._reply(update, handle_help()[1])
-
-    async def status_command(self, update, context) -> None:
-        if self._authorized(update) is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        user, _ = self._authorized(update)
-        session = await self.sessions.get(user.id)
-        await self._reply(update, handle_status(session)[1])
-
-    async def clear_command(self, update, context) -> None:
-        if self._authorized(update) is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        user, _ = self._authorized(update)
-        session = await self.sessions.get(user.id)
-        if session.state in (BotState.PROCESSING, BotState.QUEUED):
-            await self._reply(update, msg.BUSY)
-            return
-        state, reply = handle_clear(session)  # clears receipts on the detached copy
-        session.state = state
-        session.report_title = ""
-        await self.sessions.clear_receipts(user.id)  # atomic SQL clear
-        await self.sessions.save(session)
-        await self._reply(update, reply)
-
-    async def cancel_command(self, update, context) -> None:
-        if self._authorized(update) is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        user, _ = self._authorized(update)
-        session = await self.sessions.get(user.id)
-        if session.state in (BotState.PROCESSING, BotState.QUEUED):
-            await self._reply(update, msg.BUSY)
-            return
-        state, reply = handle_cancel(session)
-        session.state = state
-        await self.sessions.save(session)
-        await self._reply(update, reply)
-
-    async def generate_command(self, update, context) -> None:
-        auth = self._authorized(update)
-        if auth is None:
-            await self._reply(update, msg.UNAUTHORIZED)
-            return
-        user, chat = auth
-        session = await self.sessions.get(user.id)
-        session.chat_id = chat.id
-        processing = (
-            await self.sessions.is_processing(user.id)
-            or bool(self.locks.get(user.id).locked())
-            or session.state == BotState.QUEUED
-        )
-        state, reply = handle_generate(
-            session, has_password=self.security.has_password, processing=processing
-        )
-        if state is not None:
-            session.state = state
-        await self.sessions.save(session)
-        if reply:
-            await self._reply(update, reply)
 
     async def message_handler(self, update, context) -> None:
         auth = self._authorized(update)
@@ -305,11 +212,3 @@ class ReimbursementBot:
         if m and m.text:
             return m.text
         return ""  # a non-text message while awaiting password counts as wrong
-
-    async def _reply(self, update, text: str) -> None:
-        if not text:
-            return
-        try:
-            await update.effective_message.reply_text(text)
-        except Exception as exc:  # pragma: no cover - best effort
-            logger.warning("reply failed: %s", exc)
