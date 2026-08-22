@@ -415,7 +415,7 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
 
     handler = _Capture()
     handler.setLevel(logging.DEBUG)
-    bot_logger = logging.getLogger("app.bot.bot")
+    bot_logger = logging.getLogger("app.bot.job_processor")
     bot_logger.setLevel(logging.DEBUG)
     bot_logger.addHandler(handler)
     try:
