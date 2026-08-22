@@ -224,6 +224,21 @@ async def test_purge_expired_removes_stale(tmp_path):
     assert await store.count() == 1
 
 
+async def test_purge_expired_removes_multiple_stale(tmp_path):
+    """A single purge call must remove every stale session (SQL path, not a
+    per-row Python loop) and report the correct count."""
+    store = _store(tmp_path, ttl_seconds=30)
+    past = datetime.now(timezone.utc) - timedelta(seconds=40)
+    for uid in (1, 2, 3):
+        await store.save(
+            Session(user_id=uid, chat_id=uid, updated_at=past, created_at=past)
+        )
+    await store.save(Session(user_id=4, chat_id=4))  # fresh
+    removed = await store.purge_expired()
+    assert removed == 3
+    assert await store.count() == 1
+
+
 # ---- Cross-process processing claim --------------------------------------
 
 async def test_try_acquire_processing_single(tmp_path):

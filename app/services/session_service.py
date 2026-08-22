@@ -12,7 +12,7 @@ from app.bot.states import BotState
 from app.models.session import Session
 from app.services.backup_service import backup_database
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -31,6 +31,9 @@ _MIGRATIONS: dict[int, str] = {
     """,
     3: """
     ALTER TABLE sessions ADD COLUMN report_title TEXT NOT NULL DEFAULT '';
+    """,
+    4: """
+    CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at);
     """,
 }
 
@@ -243,20 +246,23 @@ class SessionStore:
         return await asyncio.to_thread(self._op_reset_queued)
 
     def _op_purge_expired(self) -> int:
-        """Remove sessions idle past the TTL (sync)."""
-        now = datetime.now(timezone.utc)
-        removed = 0
+        """Remove sessions idle past the TTL (sync).
+
+        Single set-based DELETE (indexed on ``updated_at``) rather than a
+        per-row Python loop, so it stays cheap as the session table grows.
+        ``updated_at`` is always written as UTC ISO-8601, so lexicographic
+        comparison is chronologically correct.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=self._ttl)).isoformat()
         conn = self._connect()
         try:
-            for row in conn.execute("SELECT user_id, updated_at FROM sessions").fetchall():
-                updated = datetime.fromisoformat(row["updated_at"])
-                if (now - updated).total_seconds() > self._ttl:
-                    conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
-                    removed += 1
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+            )
             conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
-        return removed
 
     async def purge_expired(self) -> int:
         return await asyncio.to_thread(self._op_purge_expired)
