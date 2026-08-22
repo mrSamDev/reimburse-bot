@@ -22,6 +22,8 @@ State is durable. Per-user staging sessions and the cross-process per-user lease
 
 Generation is queued, not blocking. `/generate` (after the password) enqueues a job and replies immediately with your position in line; a pool of `WORKER_COUNT` background workers drains the queue, so concurrent users are processed with bounded parallelism instead of hammering the AI provider. The queue is **in-memory** — a restart drops queued jobs and resets those sessions to idle (they can re-run `/generate`).
 
+Scaling is a wait-time dial, not a wall. With `W` workers, the last user waits roughly `total_receipts / W × time_per_receipt`. Raise `WORKER_COUNT` (up to your AI provider's rate limit) to cut wait time; the provider pool (`AI_PROVIDER=pool`) adds a second lane. The system degrades gracefully under load — it gets slower, never breaks.
+
 There's also an audit ledger. Every accepted and failed receipt lands in SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with the delivery outcome recorded. Reimbursements keep a persistent trail no matter how often the bot restarts.
 
 ## Requirements
