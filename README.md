@@ -14,7 +14,7 @@ Receipts never leave Telegram until you ask for a report. The bot holds only eac
 
 The AI does the reading, but the app owns the arithmetic. Every total is computed with Python `Decimal`, and AI output passes a Pydantic schema plus business rules before it's trusted. Raw model output never reaches the PDF layer.
 
-Storage is temporary and request-scoped. Images and the PDF sit under `temp/request_<id>/` and get deleted in a `finally` block even when something fails, while a startup sweep clears orphans left by a crash.
+Storage is temporary and request-scoped. Images and the PDF sit under `temp/request_<id>/` and get deleted in a `finally` block even when something fails, while a startup sweep clears orphans left by a crash. In Docker the temp root is a 512m tmpfs, sized for several concurrent batches (each keeps raw + normalized images until the PDF is delivered).
 
 State is durable. Per-user staging sessions and the cross-process per-user lease live in SQLite (`data/sessions.db`, WAL mode), so restarts don't lose anything and generation stays serialized across instances. A background sweep reclaims stale sessions and crashed leases.
 
