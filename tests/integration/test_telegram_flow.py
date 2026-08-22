@@ -234,6 +234,45 @@ async def test_message_during_queued_is_busy(tmp_path):
     await bot.stop_workers()
 
 
+async def test_queue_full_leaves_receipts_staged(tmp_path):
+    """When the job queue is at capacity, a new /generate is rejected with a
+    QUEUE_FULL reply, the session returns to IDLE, and staged receipts survive
+    so the user can retry without re-uploading."""
+    config = Config(
+        telegram_token="t", allowed_user_ids="111,222", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_request_delay_seconds=0, max_queue_size=1,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = FakeTransport()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
+    provider = FakeProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    # No workers started: the queue stays full after one enqueue.
+
+    # User 111 stages a receipt and generates -> enqueues (queue now full).
+    await bot.start_command(_text_update("/start", uid=111), None)
+    await bot.message_handler(_photo_update("f1", uid=111), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate"), user_id=111), None)
+    await bot.message_handler(_text_update("July Expenses", uid=111), None)
+    await bot.message_handler(_text_update("secret", uid=111), None)
+    assert (await sessions.get(111)).state == BotState.QUEUED
+
+    # User 222 tries to generate -> queue full -> QUEUE_FULL, receipts stay staged.
+    await bot.start_command(_text_update("/start", uid=222), None)
+    await bot.message_handler(_photo_update("g1", uid=222), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate"), user_id=222), None)
+    await bot.message_handler(_text_update("July Expenses", uid=222), None)
+    msg = FakeMessage("secret")
+    await bot.message_handler(FakeUpdate(msg, user_id=222), None)
+    assert (await sessions.get(222)).state == BotState.IDLE
+    assert (await sessions.get(222)).receipt_file_ids == ["g1"]
+    assert any("full" in r.lower() for r in msg.replies), msg.replies
+
+
 async def test_unauthorized_user_rejected(tmp_path):
     bot, _, _ = _build(tmp_path)
     msg = FakeMessage("/start")

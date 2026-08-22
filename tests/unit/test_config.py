@@ -218,6 +218,22 @@ def test_worker_count_must_be_positive(monkeypatch):
         load_config(strict=False)
 
 
+def test_max_queue_size_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAX_QUEUE_SIZE", raising=False)
+    assert load_config(strict=False).max_queue_size == 50
+
+    env = tmp_path / ".env"
+    env.write_text("MAX_QUEUE_SIZE=5\n")
+    assert load_config(env_file=env, strict=False).max_queue_size == 5
+
+
+def test_max_queue_size_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("MAX_QUEUE_SIZE", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
+
+
 def test_health_token_default_and_env(tmp_path, monkeypatch):
     monkeypatch.delenv("HEALTH_TOKEN", raising=False)
     assert load_config(strict=False).health_token == ""

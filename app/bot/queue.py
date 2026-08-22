@@ -17,6 +17,10 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+class QueueFullError(Exception):
+    """Raised when the job queue is at capacity and a job cannot be enqueued."""
+
+
 @dataclass
 class Job:
     """A single receipt-processing request captured at enqueue time."""
@@ -35,17 +39,25 @@ class JobQueue:
     wait. ``join`` lets tests (and shutdown) wait for in-flight work to finish.
     """
 
-    def __init__(self, worker_count: int = 2) -> None:
-        self._queue: asyncio.Queue[Job] = asyncio.Queue()
+    def __init__(self, worker_count: int = 2, max_queue_size: int = 50) -> None:
+        self._queue: asyncio.Queue[Job] = asyncio.Queue(maxsize=max_queue_size)
         self._worker_count = worker_count
         self._workers: list[asyncio.Task] = []
         self._enqueued = 0
         self._started = 0
 
     def enqueue(self, job: Job) -> int:
-        """Add ``job`` to the queue; return its 1-based position in line."""
+        """Add ``job`` to the queue; return its 1-based position in line.
+
+        Raises :class:`QueueFullError` when the queue is at capacity, so the
+        caller can reject the user gracefully instead of buffering unboundedly.
+        """
         self._enqueued += 1
-        self._queue.put_nowait(job)
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            self._enqueued -= 1  # roll back so the position counter stays accurate
+            raise QueueFullError("job queue is full") from None
         return self._enqueued - self._started
 
     def start(self, process_job: Callable[[Job], Awaitable[None]]) -> None:

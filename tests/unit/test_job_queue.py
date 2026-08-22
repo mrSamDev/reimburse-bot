@@ -2,13 +2,23 @@
 
 import asyncio
 
-from app.bot.queue import Job, JobQueue
+import pytest
+
+from app.bot.queue import Job, JobQueue, QueueFullError
 
 
 async def test_enqueue_returns_position():
     q = JobQueue(worker_count=1)
     assert q.enqueue(Job(user_id=1, chat_id=1, file_ids=["f1"])) == 1
     assert q.enqueue(Job(user_id=2, chat_id=2, file_ids=["f2"])) == 2
+
+
+async def test_enqueue_raises_when_full():
+    q = JobQueue(worker_count=1, max_queue_size=2)
+    q.enqueue(Job(user_id=1, chat_id=1, file_ids=[]))
+    q.enqueue(Job(user_id=2, chat_id=2, file_ids=[]))
+    with pytest.raises(QueueFullError):
+        q.enqueue(Job(user_id=3, chat_id=3, file_ids=[]))
 
 
 async def test_worker_processes_jobs_in_order():

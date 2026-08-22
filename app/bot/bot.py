@@ -20,7 +20,7 @@ from app.bot.logic import (
     handle_start,
     handle_status,
 )
-from app.bot.queue import Job, JobQueue
+from app.bot.queue import Job, JobQueue, QueueFullError
 from app.bot.states import BotState
 from app.bot.throttle import PasswordThrottle
 from app.config import Config
@@ -57,7 +57,9 @@ class ReimbursementBot:
         self.telegram = telegram
         self.processing = processing
         self.locks = UserLockManager()
-        self.queue = JobQueue(worker_count=config.worker_count)
+        self.queue = JobQueue(
+            worker_count=config.worker_count, max_queue_size=config.max_queue_size
+        )
         self.throttle = PasswordThrottle(
             max_attempts=config.password_max_attempts,
             lockout_seconds=config.password_lockout_seconds,
@@ -257,14 +259,22 @@ class ReimbursementBot:
         self.throttle.reset(session.user_id)
         session.state = new_state  # QUEUED: job is enqueued, worker processes it
         await self.sessions.save(session)
-        position = self.queue.enqueue(
-            Job(
-                user_id=session.user_id,
-                chat_id=session.chat_id,
-                file_ids=list(session.receipt_file_ids),
-                title=session.report_title,
+        try:
+            position = self.queue.enqueue(
+                Job(
+                    user_id=session.user_id,
+                    chat_id=session.chat_id,
+                    file_ids=list(session.receipt_file_ids),
+                    title=session.report_title,
+                )
             )
-        )
+        except QueueFullError:
+            # Queue at capacity: revert to IDLE, keep receipts staged so the
+            # user can retry /generate without re-uploading.
+            session.state = BotState.IDLE
+            await self.sessions.save(session)
+            await self._reply(update, msg.QUEUE_FULL)
+            return
         await self._reply(update, msg.QUEUED.format(position=position))
 
     async def _process_job(self, job: Job) -> None:
