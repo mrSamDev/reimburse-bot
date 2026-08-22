@@ -71,7 +71,9 @@ class ProviderPool(ReceiptVisionProvider):
                     type(provider).__name__,
                     exc,
                 )
-        raise last_exc  # type: ignore[misc]  # at least one provider, all failed
+        if last_exc is not None:
+            raise last_exc
+        raise AIProviderError("all providers failed")  # pragma: no cover - providers non-empty
 
     def _extract_priority(self, image_path: str | Path) -> ReceiptExtraction:
         ordered = self._ordered()
@@ -95,4 +97,6 @@ class ProviderPool(ReceiptVisionProvider):
                 )
         if last_result is not None:
             return last_result
-        raise last_exc  # type: ignore[misc]  # at least one provider, all failed
+        if last_exc is not None:
+            raise last_exc
+        raise AIProviderError("all providers failed")  # pragma: no cover - providers non-empty

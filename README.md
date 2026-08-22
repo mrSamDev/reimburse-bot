@@ -24,6 +24,8 @@ Generation is queued, not blocking. `/generate` (after the password) enqueues a 
 
 Scaling is a wait-time dial, not a wall. With `W` workers, the last user waits roughly `total_receipts / W × time_per_receipt`. Raise `WORKER_COUNT` (up to your AI provider's rate limit) to cut wait time; the provider pool (`AI_PROVIDER=pool`) adds a second lane. The system degrades gracefully under load — it gets slower, never breaks.
 
+Concurrency is bounded by `WORKER_COUNT × AI_CONCURRENCY` = max concurrent AI calls (default 2 × 1 = 2). These are the only two concurrency dials; don't add a third. The per-user processing lease is **crash recovery**, not multi-instance support: if the process dies mid-generation, the lease expiry is what lets the next start reclaim the stuck `PROCESSING` session. The bot is **single-instance by design** (Telegram long-polling can't have two pollers on one token); scaling out would require webhooks + a shared temp dir + a distributed queue.
+
 There's also an audit ledger. Every accepted and failed receipt lands in SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with the delivery outcome recorded. Reimbursements keep a persistent trail no matter how often the bot restarts.
 
 ## Requirements
