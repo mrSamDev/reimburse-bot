@@ -50,6 +50,8 @@ SESSION_CLEARED = "Session cleared."
 
 PROCESSING_STARTED = "Processing {n} receipts…"
 
+QUEUED = "You're #{position} in the queue. I'll send the report when it's ready."
+
 PROCESSING_PROGRESS = "Processing {done}/{total} receipts…"
 
 REPORT_READY = (

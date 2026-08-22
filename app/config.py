@@ -51,6 +51,7 @@ class Config(BaseModel):
     ai_concurrency: int = 1
     ai_per_receipt_timeout_seconds: int = 120
     ai_max_calls_per_run: int = 100
+    worker_count: int = 2
     max_processing_seconds: float = 600.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
@@ -135,6 +136,13 @@ class Config(BaseModel):
     def _check_concurrency(cls, v: int) -> int:
         if v < 1:
             raise ValueError("ai_concurrency must be >= 1")
+        return v
+
+    @field_validator("worker_count")
+    @classmethod
+    def _check_worker_count(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("worker_count must be >= 1")
         return v
 
     @field_validator("session_lease_ttl_seconds")
@@ -262,6 +270,7 @@ def _from_env() -> dict[str, Any]:
         "ai_concurrency": int(get("AI_CONCURRENCY", "1")),
         "ai_per_receipt_timeout_seconds": int(get("AI_PER_RECEIPT_TIMEOUT_SECONDS", "120")),
         "ai_max_calls_per_run": int(get("AI_MAX_CALLS_PER_RUN", "100")),
+        "worker_count": int(get("WORKER_COUNT", "2")),
         "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "600")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),

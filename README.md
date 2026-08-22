@@ -18,6 +18,8 @@ Storage is temporary and request-scoped. Images and the PDF sit under `temp/requ
 
 State is durable. Per-user staging sessions and the cross-process per-user lease live in SQLite (`data/sessions.db`, WAL mode), so restarts don't lose anything and generation stays serialized across instances. A background sweep reclaims stale sessions and crashed leases.
 
+Generation is queued, not blocking. `/generate` (after the password) enqueues a job and replies immediately with your position in line; a pool of `WORKER_COUNT` background workers drains the queue, so concurrent users are processed with bounded parallelism instead of hammering the AI provider. The queue is **in-memory** — a restart drops queued jobs and resets those sessions to idle (they can re-run `/generate`).
+
 There's also an audit ledger. Every accepted and failed receipt lands in SQLite (`data/receipts.db`), deduplicated by Telegram `file_id`, with the delivery outcome recorded. Reimbursements keep a persistent trail no matter how often the bot restarts.
 
 ## Requirements
@@ -57,7 +59,8 @@ python -m app.main         # start long polling
 | `AI_RETRY_ATTEMPTS` | Retries on transient AI failures (default 3) |
 | `AI_RETRY_BASE_DELAY` | Backoff seconds between AI retries (default 1.0) |
 | `AI_REQUEST_DELAY_SECONDS` | Pause between consecutive receipts; 0 disables (default 1.0) |
-| `AI_CONCURRENCY` | Max receipts extracted in parallel (default 1, one at a time) |
+| `AI_CONCURRENCY` | Max receipts extracted in parallel within one batch (default 1, one at a time) |
+| `WORKER_COUNT` | Background workers draining the job queue; the global cap on concurrent batches (default 2) |
 | `MAX_PROCESSING_SECONDS` | Soft whole-batch time budget, 0 disables (default 600) |
 | `SESSION_LEASE_TTL_SECONDS` | Seconds before a crashed generation's processing lease is reclaimable (default 120) |
 | `MAINTENANCE_INTERVAL_SECONDS` | Background lease-reclaim + session-purge sweep interval (default 60) |

@@ -173,6 +173,27 @@ async def test_persists_across_store_instances(tmp_path):
     assert (await s2.get(5)).receipt_file_ids == ["f1"]
 
 
+async def test_reset_queued_returns_to_idle(tmp_path):
+    store = _store(tmp_path)
+    s = await store.get(5)
+    s.state = BotState.QUEUED
+    await store.save(s)
+    assert (await store.get(5)).state == BotState.QUEUED
+    assert await store.reset_queued() == 1
+    assert (await store.get(5)).state == BotState.IDLE
+
+
+async def test_reset_queued_leaves_other_states_alone(tmp_path):
+    store = _store(tmp_path)
+    for uid, state in [(1, BotState.PROCESSING), (2, BotState.COLLECTING), (3, BotState.IDLE)]:
+        s = await store.get(uid)
+        s.state = state
+        await store.save(s)
+    assert await store.reset_queued() == 0
+    assert (await store.get(1)).state == BotState.PROCESSING
+    assert (await store.get(2)).state == BotState.COLLECTING
+
+
 # ---- TTL ------------------------------------------------------------------
 
 async def test_expired_session_returns_fresh(tmp_path):
@@ -441,20 +462,35 @@ async def test_post_init_starts_and_cancels_maintenance_task(tmp_path):
     await store.try_acquire_processing(1)
     _force_lease_expiry(tmp_path, 1)
 
+    class _FakeBot:
+        def __init__(self):
+            self.locks = type("L", (), {"evict_idle": lambda idle: 0})()
+            self.started = False
+            self.stopped = False
+
+        def start_workers(self):
+            self.started = True
+
+        async def stop_workers(self):
+            self.stopped = True
+
     class _FakeApp:
         def __init__(self):
             self.post_init = None
             self.post_shutdown = None
 
+    bot = _FakeBot()
     app = _FakeApp()
-    post_init = _make_post_init(store, 0.01)
+    post_init = _make_post_init(store, 0.01, bot)
     await post_init(app)
     assert app.post_shutdown is not None
+    assert bot.started is True
     await asyncio.sleep(0.06)  # let the task run its sweep
     # The abandoned lease was reclaimed by the scheduled task.
     assert await store.try_acquire_processing(1) is True
-    # Shutdown cancels and reaps the task cleanly.
+    # Shutdown cancels and reaps the task cleanly, and stops the workers.
     await app.post_shutdown(app)
+    assert bot.stopped is True
 
 
 

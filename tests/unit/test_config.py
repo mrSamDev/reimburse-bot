@@ -39,6 +39,7 @@ def test_defaults():
     assert cfg.ai_concurrency == 1
     assert cfg.ai_request_delay_seconds == 1.0
     assert cfg.image_max_edge == 1024
+    assert cfg.worker_count == 2
 
 
 def test_default_provider_openai_requires_key_at_runtime():
@@ -157,6 +158,22 @@ def test_ai_max_calls_per_run_default_and_env(tmp_path, monkeypatch):
 def test_ai_max_calls_per_run_must_be_positive(monkeypatch):
     _clear_env()
     monkeypatch.setenv("AI_MAX_CALLS_PER_RUN", "0")
+    with pytest.raises((ConfigError, ValueError)):
+        load_config(strict=False)
+
+
+def test_worker_count_default_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("WORKER_COUNT", raising=False)
+    assert load_config(strict=False).worker_count == 2
+
+    env = tmp_path / ".env"
+    env.write_text("WORKER_COUNT=4\n")
+    assert load_config(env_file=env, strict=False).worker_count == 4
+
+
+def test_worker_count_must_be_positive(monkeypatch):
+    _clear_env()
+    monkeypatch.setenv("WORKER_COUNT", "0")
     with pytest.raises((ConfigError, ValueError)):
         load_config(strict=False)
 

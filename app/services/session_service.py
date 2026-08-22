@@ -222,6 +222,26 @@ class SessionStore:
     async def clear(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_clear, user_id)
 
+    def _op_reset_queued(self) -> int:
+        """Reset any session stuck in QUEUED back to IDLE (sync).
+
+        The job queue is in-memory, so after a restart a QUEUED session has no
+        worker behind it; reset it so the user can re-run /generate.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "UPDATE sessions SET state = ? WHERE state = ?",
+                (BotState.IDLE.value, BotState.QUEUED.value),
+            )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+    async def reset_queued(self) -> int:
+        return await asyncio.to_thread(self._op_reset_queued)
+
     def _op_purge_expired(self) -> int:
         """Remove sessions idle past the TTL (sync)."""
         now = datetime.now(timezone.utc)

@@ -57,30 +57,33 @@ async def _maintenance_loop(
 def _make_post_init(
     sessions: SessionStore,
     interval_seconds: float,
-    locks=None,
+    bot,
     lock_idle_seconds: float = 0.0,
 ):
-    """Return a ``post_init`` that starts the maintenance task and tracks it.
+    """Return a ``post_init`` that starts the maintenance task and the job
+    queue workers, and tracks them for clean shutdown.
 
     PTB's ``Application`` uses ``__slots__``, so the task reference is held in a
     closure (never attached to the app object). ``post_shutdown`` cancels and
-    awaits the task so it is reaped cleanly at shutdown instead of leaking.
+    awaits the task and stops the workers so they are reaped cleanly at shutdown
+    instead of leaking.
     """
-    evict_idle = locks.evict_idle if locks is not None else None
+    evict_idle = bot.locks.evict_idle if bot is not None else None
     holder: dict = {"task": None}
 
     async def _post_shutdown(_app) -> None:
         task = holder["task"]
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await bot.stop_workers()
 
     async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
+        bot.start_workers()
         holder["task"] = asyncio.get_running_loop().create_task(
             _maintenance_loop(
                 sessions.sweep,
@@ -138,7 +141,7 @@ def build_application(
     app.post_init = _make_post_init(
         sessions,
         config.maintenance_interval_seconds,
-        bot.locks,
+        bot,
         config.session_lease_ttl_seconds,
     )
     return app
@@ -216,6 +219,14 @@ def main() -> None:
     purged = asyncio.run(sessions.purge_expired())
     if purged:
         logger.warning("purged %d expired sessions", purged)
+
+    # The job queue is in-memory, so a restart loses queued jobs; reset any
+    # sessions left in QUEUED so users aren't stuck waiting forever.
+    reset_queued = asyncio.run(sessions.reset_queued())
+    if reset_queued:
+        logger.warning(
+            "reset %d queued sessions to IDLE (queue is in-memory)", reset_queued
+        )
 
     # Durable backup of the audit + session DBs before serving.
     ledger = ReceiptLedger(config.data_dir / "receipts.db")
