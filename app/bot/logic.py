@@ -57,9 +57,13 @@ def handle_heading(session, candidate: str) -> tuple:
 
 
 def handle_password(session, candidate: str, *, security) -> tuple:
-    """Return (new_state, reply, correct_bool)."""
+    """Return (new_state, reply, correct_bool).
+
+    A correct password moves the session to ``QUEUED``: the job is enqueued and
+    a background worker performs the actual processing.
+    """
     if security.check_password(candidate):
-        return BotState.PROCESSING, None, True
+        return BotState.QUEUED, None, True
     return BotState.IDLE, msg.WRONG_PASSWORD, False
 
 

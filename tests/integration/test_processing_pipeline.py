@@ -81,13 +81,13 @@ async def test_full_pipeline_success(tmp_path):
     async def deliver(result):
         # PDF still exists here (before cleanup).
         delivered["exists"] = result.out_pdf_path.exists()
-        delivered["total"] = result.batch.total
+        delivered["total"] = result.batch.currency_totals["AED"]
 
     svc = ProcessingService(cfg, FakeProvider([_ext("A", "53.50"), _ext("B", "51.00")]), FakeTelegram())
     result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir, deliver=deliver)
     assert result.processed_count == 2
     assert result.failed_count == 0
-    assert result.batch.total == 104.50
+    assert result.batch.currency_totals["AED"] == 104.50
     assert delivered["exists"] is True
     # After cleanup the request dir is gone.
     assert not result.request_base.exists()
@@ -191,7 +191,7 @@ async def test_single_failing_receipt_does_not_destroy_batch(tmp_path):
     result = await run_with_cleanup(svc, 1, ["f1", "f2"], cfg.temp_dir)
     assert result.failed_count == 1
     assert result.processed_count == 1
-    assert result.batch.total == 10.00
+    assert result.batch.currency_totals["AED"] == 10.00
 
 
 async def test_corrupt_receipt_marked_failed(tmp_path):

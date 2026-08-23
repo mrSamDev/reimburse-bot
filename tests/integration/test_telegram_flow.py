@@ -36,6 +36,7 @@ class FakeTransport:
     def __init__(self):
         self.get_file_calls = 0
         self.sent_docs = []
+        self.sent_messages = []
         self.deleted = []
 
     async def get_file(self, file_id):
@@ -44,6 +45,9 @@ class FakeTransport:
 
     async def send_document(self, chat_id, document=None, caption="", timeout=None, read_timeout=None, write_timeout=None):
         self.sent_docs.append(caption)
+
+    async def send_message(self, chat_id, text):
+        self.sent_messages.append(text)
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append(message_id)
@@ -120,6 +124,7 @@ def _build(tmp_path, allowed="111", password="secret"):
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
     return bot, transport, sessions
 
 
@@ -156,6 +161,7 @@ async def test_full_authorized_flow(tmp_path):
     assert (await sessions.get(111)).state == BotState.AWAITING_PASSWORD
 
     await bot.message_handler(_text_update("secret"), None)
+    await bot.queue.join()
     assert len(transport.sent_docs) == 1
     caption = transport.sent_docs[0]
     assert "Receipts: 2" in caption
@@ -165,6 +171,129 @@ async def test_full_authorized_flow(tmp_path):
     assert session.receipt_file_ids == []
     leftovers = [p for p in Path(tmp_path).iterdir() if p.name.startswith("request_")]
     assert leftovers == []
+    await bot.stop_workers()
+
+
+async def test_generate_enqueues_and_worker_delivers(tmp_path):
+    """A correct password enqueues the job and returns immediately (QUEUED);
+    the background worker processes it and delivers the PDF asynchronously."""
+    bot, transport, sessions = _build(tmp_path)
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+
+    # Correct password enqueues the job and returns immediately (QUEUED).
+    msg = FakeMessage("secret")
+    await bot.message_handler(FakeUpdate(msg), None)
+    assert (await sessions.get(111)).state == BotState.QUEUED
+    assert "queue" in msg.replies[-1].lower()
+
+    # The worker processes it asynchronously and delivers.
+    await bot.queue.join()
+    assert len(transport.sent_docs) == 1
+    finished = await sessions.get(111)
+    assert finished.state == BotState.IDLE
+    assert finished.receipt_file_ids == []
+    await bot.stop_workers()
+
+
+async def test_message_during_queued_is_busy(tmp_path):
+    """A message arriving while a job is queued (not yet processing) must be
+    rejected as busy, not misread as a password/heading or staged as a receipt."""
+    bot, transport, sessions = _build(tmp_path)
+    await bot.start_command(_text_update("/start"), None)
+    await bot.message_handler(_photo_update("f1"), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
+    await bot.message_handler(_text_update("July Expenses"), None)
+
+    # Slow provider so the job stays queued/processing long enough to interleave.
+    class _Slow(FakeProvider):
+        def extract_receipt(self, image_path):
+            import time as _t
+            _t.sleep(0.3)
+            return super().extract_receipt(image_path)
+
+    bot.processing._provider = _Slow()
+
+    await bot.message_handler(_text_update("secret"), None)
+    # Poll until the job is queued or processing (before it finishes).
+    for _ in range(100):
+        s = await sessions.get(111)
+        if s is not None and s.state in (BotState.QUEUED, BotState.PROCESSING):
+            break
+        await asyncio.sleep(0.01)
+
+    busy_msg = FakeMessage(photo=[FakePhoto("f2")], message_id=88)
+    await bot.message_handler(FakeUpdate(busy_msg), None)
+    assert any("Please wait" in r for r in busy_msg.replies), busy_msg.replies
+    assert 88 not in transport.deleted
+
+    await bot.queue.join()
+    assert len(transport.sent_docs) == 1
+    await bot.stop_workers()
+
+
+async def test_queue_full_leaves_receipts_staged(tmp_path):
+    """When the job queue is at capacity, a new /generate is rejected with a
+    QUEUE_FULL reply, the session returns to IDLE, and staged receipts survive
+    so the user can retry without re-uploading."""
+    config = Config(
+        telegram_token="t", allowed_user_ids="111,222", bot_password="secret",
+        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
+        max_receipts=20, ai_request_delay_seconds=0, max_queue_size=1,
+        report_title="Heading Travel Expenses", report_period="July Expenses",
+    )
+    transport = FakeTransport()
+    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
+    security = SecurityService(config)
+    sessions = SessionStore(db_path=tmp_path / "sessions.db")
+    provider = FakeProvider()
+    processing = ProcessingService(config, provider, telegram)
+    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    # No workers started: the queue stays full after one enqueue.
+
+    # User 111 stages a receipt and generates -> enqueues (queue now full).
+    await bot.start_command(_text_update("/start", uid=111), None)
+    await bot.message_handler(_photo_update("f1", uid=111), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate"), user_id=111), None)
+    await bot.message_handler(_text_update("July Expenses", uid=111), None)
+    await bot.message_handler(_text_update("secret", uid=111), None)
+    assert (await sessions.get(111)).state == BotState.QUEUED
+
+    # User 222 tries to generate -> queue full -> QUEUE_FULL, receipts stay staged.
+    await bot.start_command(_text_update("/start", uid=222), None)
+    await bot.message_handler(_photo_update("g1", uid=222), None)
+    await bot.generate_command(FakeUpdate(FakeMessage("/generate"), user_id=222), None)
+    await bot.message_handler(_text_update("July Expenses", uid=222), None)
+    msg = FakeMessage("secret")
+    await bot.message_handler(FakeUpdate(msg, user_id=222), None)
+    assert (await sessions.get(222)).state == BotState.IDLE
+    assert (await sessions.get(222)).receipt_file_ids == ["g1"]
+    assert any("full" in r.lower() for r in msg.replies), msg.replies
+
+
+async def test_notify_queued_lost_sends_message_and_resets(tmp_path):
+    """On startup, users whose queued jobs were lost (in-memory queue reset)
+    are notified and their sessions reset to IDLE so they can re-run /generate."""
+    bot, transport, sessions = _build(tmp_path)
+    s = await sessions.get(111)
+    s.state = BotState.QUEUED
+    await sessions.save(s)
+
+    n = await bot.notify_queued_lost()
+    assert n == 1
+    assert (await sessions.get(111)).state == BotState.IDLE
+    assert any("lost" in m.lower() for m in transport.sent_messages), transport.sent_messages
+    await bot.stop_workers()
+
+
+async def test_notify_queued_lost_noop_when_none_queued(tmp_path):
+    bot, transport, sessions = _build(tmp_path)
+    n = await bot.notify_queued_lost()
+    assert n == 0
+    assert transport.sent_messages == []
+    await bot.stop_workers()
 
 
 async def test_unauthorized_user_rejected(tmp_path):
@@ -172,6 +301,7 @@ async def test_unauthorized_user_rejected(tmp_path):
     msg = FakeMessage("/start")
     await bot.start_command(FakeUpdate(msg, user_id=999), None)
     assert "not authorized" in msg.replies[-1].lower()
+    await bot.stop_workers()
 
 
 async def test_wrong_password_returns_to_idle(tmp_path):
@@ -189,6 +319,7 @@ async def test_wrong_password_returns_to_idle(tmp_path):
     assert transport.sent_docs == []
     # The password message was best-effort deleted.
     assert transport.deleted
+    await bot.stop_workers()
 
 
 async def test_unsupported_document_rejected(tmp_path):
@@ -199,6 +330,7 @@ async def test_unsupported_document_rejected(tmp_path):
     await bot.message_handler(update, None)
     assert (await sessions.get(111)).receipt_file_ids == []
     assert doc_msg.replies and "image" in doc_msg.replies[-1].lower()
+    await bot.stop_workers()
 
 
 async def test_duplicate_receipt_not_staged(tmp_path):
@@ -207,6 +339,7 @@ async def test_duplicate_receipt_not_staged(tmp_path):
     await bot.message_handler(_photo_update("f1"), None)
     await bot.message_handler(_photo_update("f1"), None)
     assert (await sessions.get(111)).receipt_file_ids == ["f1"]
+    await bot.stop_workers()
 
 
 async def test_report_caption_surfaces_failed_receipts(tmp_path):
@@ -233,6 +366,7 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
     provider = _FailOnceProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
 
     await bot.start_command(_text_update("/start"), None)
     await bot.message_handler(_photo_update("f1"), None)
@@ -240,10 +374,12 @@ async def test_report_caption_surfaces_failed_receipts(tmp_path):
     await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
     await bot.message_handler(_text_update("July Expenses"), None)
     await bot.message_handler(_text_update("secret"), None)
+    await bot.queue.join()
 
     assert transport.sent_docs
     assert "Could not process 1 receipt(s)" in transport.sent_docs[-1]
     assert "Receipts: 1" in transport.sent_docs[-1]
+    await bot.stop_workers()
 
 
 async def test_catch_all_error_log_carries_request_id(tmp_path):
@@ -275,10 +411,11 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
 
     handler = _Capture()
     handler.setLevel(logging.DEBUG)
-    bot_logger = logging.getLogger("app.bot.bot")
+    bot_logger = logging.getLogger("app.bot.job_processor")
     bot_logger.setLevel(logging.DEBUG)
     bot_logger.addHandler(handler)
     try:
@@ -287,12 +424,14 @@ async def test_catch_all_error_log_carries_request_id(tmp_path):
         await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
         await bot.message_handler(_text_update("July Expenses"), None)
         await bot.message_handler(_text_update("secret"), None)
+        await bot.queue.join()
 
         catch_all = [ln for ln in handler.lines if "unhandled processing error" in ln]
         assert catch_all, "expected the bot catch-all to log"
         assert _re.search(r"\[request_id=[0-9a-f]{6}\]", catch_all[0]), catch_all[0]
     finally:
         bot_logger.removeHandler(handler)
+    await bot.stop_workers()
 
 
 async def test_concurrent_message_during_generation_is_busy(tmp_path):
@@ -320,6 +459,7 @@ async def test_concurrent_message_during_generation_is_busy(tmp_path):
     provider = _SlowProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
 
     await bot.start_command(_text_update("/start"), None)
     await bot.message_handler(_photo_update("f1"), None)
@@ -350,64 +490,12 @@ async def test_concurrent_message_during_generation_is_busy(tmp_path):
     assert live.receipt_file_ids == ["f1"]
 
     await gen_task
+    await bot.queue.join()
     assert len(transport.sent_docs) == 1, "the original generation must still deliver"
     finished = await sessions.get(111)
     assert finished.state == BotState.IDLE
     assert finished.receipt_file_ids == []
-
-
-async def test_lease_renewed_during_long_generation(tmp_path):
-    """A generation running longer than the lease TTL must renew the
-    cross-process lease (heartbeat) so a rival instance cannot double-process.
-
-    Regression for the lease-vs-runtime race: with a tiny lease TTL shorter than
-    the run, a second SessionStore (another process) must still be unable to
-    steal the slot while the run is in flight, and only re-acquire it after the
-    generation completes and releases the lease.
-    """
-    class _SlowProvider(FakeProvider):
-        def extract_receipt(self, image_path):
-            time.sleep(2.4)  # hold generation open past the tiny lease TTL
-            return super().extract_receipt(image_path)
-
-    config = Config(
-        telegram_token="t", allowed_user_ids="111", bot_password="secret",
-        ai_provider="openai", openai_api_key="k", temp_dir=tmp_path,
-        max_receipts=20, ai_request_delay_seconds=0, ai_concurrency=1,
-        session_lease_ttl_seconds=1,  # shorter than the ~2.4s run
-        report_title="Heading Travel Expenses", report_period="July Expenses",
-    )
-    transport = FakeTransport()
-    telegram = TelegramService(transport, timeout=30, max_file_size_mb=10)
-    security = SecurityService(config)
-    sessions = SessionStore(
-        db_path=tmp_path / "sessions.db",
-        ttl_seconds=1800, lease_ttl_seconds=1,
-    )
-    provider = _SlowProvider()
-    processing = ProcessingService(config, provider, telegram)
-    bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
-
-    await bot.start_command(_text_update("/start"), None)
-    await bot.message_handler(_photo_update("f1"), None)
-    await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
-    await bot.message_handler(_text_update("July Expenses"), None)
-
-    gen_task = asyncio.create_task(bot.message_handler(_text_update("secret"), None))
-    # Wait until the generation has acquired the lease and started the slow run.
-    await asyncio.sleep(1.6)  # > lease_ttl (1s) without a heartbeat it'd be stale
-
-    # A rival instance must NOT reclaim the slot mid-run: the heartbeat renewed it.
-    rival = SessionStore(
-        db_path=tmp_path / "sessions.db",
-        ttl_seconds=1800, lease_ttl_seconds=1,
-    )
-    assert await rival.try_acquire_processing(111) is False
-
-    await gen_task
-    assert len(transport.sent_docs) == 1
-    # After completion the lease is released and re-acquirable.
-    assert await rival.try_acquire_processing(111) is True
+    await bot.stop_workers()
 
 
 async def test_delivery_failure_keeps_staged_receipts_for_retry(tmp_path):
@@ -439,12 +527,14 @@ async def test_delivery_failure_keeps_staged_receipts_for_retry(tmp_path):
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
 
     await bot.start_command(_text_update("/start"), None)
     await bot.message_handler(_photo_update("f1"), None)
     await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
     await bot.message_handler(_text_update("July Expenses"), None)
     await bot.message_handler(_text_update("secret"), None)
+    await bot.queue.join()
 
     # First delivery fails: an error is surfaced but receipts stay staged.
     assert transport.sent_docs == []
@@ -456,10 +546,12 @@ async def test_delivery_failure_keeps_staged_receipts_for_retry(tmp_path):
     await bot.generate_command(FakeUpdate(FakeMessage("/generate")), None)
     await bot.message_handler(_text_update("July Expenses"), None)
     await bot.message_handler(_text_update("secret"), None)
+    await bot.queue.join()
     assert len(transport.sent_docs) == 1
     session = await sessions.get(111)
     assert session.receipt_file_ids == []
     assert session.state == BotState.IDLE
+    await bot.stop_workers()
 
 
 async def test_photo_during_awaiting_password_not_deleted(tmp_path):
@@ -483,7 +575,9 @@ async def test_photo_during_awaiting_password_not_deleted(tmp_path):
 
     # The correct password still proceeds and delivers.
     await bot.message_handler(_text_update("secret"), None)
+    await bot.queue.join()
     assert len(transport.sent_docs) == 1
+    await bot.stop_workers()
 
 
 async def test_password_lockout_after_repeated_attempts(tmp_path):
@@ -503,6 +597,7 @@ async def test_password_lockout_after_repeated_attempts(tmp_path):
     provider = FakeProvider()
     processing = ProcessingService(config, provider, telegram)
     bot = ReimbursementBot(config, security, sessions, telegram, provider, processing)
+    bot.start_workers()
 
     await bot.start_command(_text_update("/start"), None)
     await bot.message_handler(_photo_update("f1"), None)
@@ -533,3 +628,4 @@ async def test_password_lockout_after_repeated_attempts(tmp_path):
     await bot.message_handler(FakeUpdate(msg3), None)
     assert transport.sent_docs == []
     assert "Too many" in msg3.replies[-1]
+    await bot.stop_workers()

@@ -12,6 +12,7 @@ class BotState(str, Enum):
     COLLECTING = "COLLECTING"
     AWAITING_HEADING = "AWAITING_HEADING"
     AWAITING_PASSWORD = "AWAITING_PASSWORD"
+    QUEUED = "QUEUED"
     PROCESSING = "PROCESSING"
 
     def __str__(self) -> str:  # pragma: no cover - trivial

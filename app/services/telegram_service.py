@@ -50,6 +50,10 @@ class TelegramService:
                 write_timeout=self._timeout,
             )
 
+    async def send_message(self, chat_id: int, text: str) -> None:
+        """Send a plain text message to ``chat_id`` (used by background workers)."""
+        await self._bot.send_message(chat_id, text)
+
     async def delete_message(self, chat_id: int, message_id: int) -> None:
         try:
             await self._bot.delete_message(chat_id, message_id)

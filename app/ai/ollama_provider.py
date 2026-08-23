@@ -16,6 +16,7 @@ from app.ai.openai_provider import (
     _parse_retry_after,
     _retry_after_header,
 )
+from app.ai.pool import ProviderPool
 from app.config import Config
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,16 @@ class OllamaProvider(ReceiptVisionProvider):
 
 
 def build_provider(config: Config) -> ReceiptVisionProvider:
-    """Factory returning the configured provider."""
+    """Factory returning the configured provider (or a pool of both)."""
+    if config.ai_provider == "pool":
+        openai = OpenAIProvider(config)
+        ollama = OllamaProvider(config)
+        if config.ai_pool_strategy == "priority":
+            primary = ollama if config.ai_pool_primary == "ollama" else openai
+            return ProviderPool(
+                [openai, ollama], strategy="priority", primary=primary
+            )
+        return ProviderPool([openai, ollama], strategy="round_robin")
     if config.ai_provider == "openai":
         return OpenAIProvider(config)
     if config.ai_provider == "ollama":

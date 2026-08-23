@@ -5,7 +5,7 @@ compare). This throttle locks a user out after ``max_attempts`` consecutive
 failures for ``lockout_seconds``; a correct password resets the counter.
 
 In-memory and per-process by design: a lockout does not need to survive a
-restart, and it keeps the store (and cross-process semantics) untouched.
+restart, and it keeps the store untouched.
 """
 
 from __future__ import annotations
