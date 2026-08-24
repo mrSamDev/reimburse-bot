@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-SUPPORTED_PROVIDERS = {"openai", "ollama"}
+SUPPORTED_PROVIDERS = {"openai", "ollama", "pool"}
 SUPPORTED_IMAGE_FORMATS = {"image/jpeg", "image/png", "image/webp"}
 
 
@@ -32,6 +32,8 @@ class Config(BaseModel):
     allowed_chat_ids: list[int] = Field(default_factory=list)
     bot_password: str = ""
     ai_provider: str = "openai"
+    ai_pool_strategy: str = "round_robin"
+    ai_pool_primary: str = "ollama"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     ollama_base_url: str = "http://localhost:11434/v1"
@@ -49,12 +51,15 @@ class Config(BaseModel):
     ai_retry_base_delay: float = 1.0
     ai_request_delay_seconds: float = 1.0
     ai_concurrency: int = 1
+    max_concurrent_ai_calls: int = 8
     ai_per_receipt_timeout_seconds: int = 120
     ai_max_calls_per_run: int = 100
+    worker_count: int = 2
+    max_queue_size: int = 50
     max_processing_seconds: float = 600.0
     telegram_timeout_seconds: int = 30
     session_ttl_seconds: int = 1800
-    session_lease_ttl_seconds: int = 120
+    lock_idle_seconds: int = 300
     maintenance_interval_seconds: int = 60
     log_level: str = "INFO"
     log_format: str = "text"
@@ -77,6 +82,22 @@ class Config(BaseModel):
             raise ValueError(
                 f"Unsupported AI provider '{v}'. Choose one of {sorted(SUPPORTED_PROVIDERS)}"
             )
+        return v
+
+    @field_validator("ai_pool_strategy")
+    @classmethod
+    def _check_pool_strategy(cls, v: str) -> str:
+        v = (v or "round_robin").strip().lower()
+        if v not in {"round_robin", "priority"}:
+            raise ValueError("ai_pool_strategy must be 'round_robin' or 'priority'")
+        return v
+
+    @field_validator("ai_pool_primary")
+    @classmethod
+    def _check_pool_primary(cls, v: str) -> str:
+        v = (v or "ollama").strip().lower()
+        if v not in {"openai", "ollama"}:
+            raise ValueError("ai_pool_primary must be 'openai' or 'ollama'")
         return v
 
     @field_validator("allowed_user_ids", "allowed_chat_ids", mode="before")
@@ -137,11 +158,32 @@ class Config(BaseModel):
             raise ValueError("ai_concurrency must be >= 1")
         return v
 
-    @field_validator("session_lease_ttl_seconds")
+    @field_validator("max_concurrent_ai_calls")
     @classmethod
-    def _check_lease_ttl(cls, v: int) -> int:
+    def _check_max_concurrent_ai_calls(cls, v: int) -> int:
         if v < 1:
-            raise ValueError("session_lease_ttl_seconds must be >= 1")
+            raise ValueError("max_concurrent_ai_calls must be >= 1")
+        return v
+
+    @field_validator("worker_count")
+    @classmethod
+    def _check_worker_count(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("worker_count must be >= 1")
+        return v
+
+    @field_validator("max_queue_size")
+    @classmethod
+    def _check_max_queue_size(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_queue_size must be >= 1")
+        return v
+
+    @field_validator("lock_idle_seconds")
+    @classmethod
+    def _check_lock_idle(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("lock_idle_seconds must be >= 1")
         return v
 
     @field_validator("log_format")
@@ -226,6 +268,17 @@ class Config(BaseModel):
             raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=openai")
         if self.ai_provider == "ollama" and not self.ollama_base_url:
             raise ValueError("OLLAMA_BASE_URL is required when AI_PROVIDER=ollama")
+        if self.ai_provider == "pool":
+            if not self.openai_api_key:
+                raise ValueError("OPENAI_API_KEY is required when AI_PROVIDER=pool")
+            if not self.ollama_base_url:
+                raise ValueError("OLLAMA_BASE_URL is required when AI_PROVIDER=pool")
+        if self.worker_count * self.ai_concurrency > self.max_concurrent_ai_calls:
+            raise ValueError(
+                f"worker_count ({self.worker_count}) × ai_concurrency "
+                f"({self.ai_concurrency}) = {self.worker_count * self.ai_concurrency} "
+                f"exceeds max_concurrent_ai_calls ({self.max_concurrent_ai_calls})"
+            )
         return self
 
 
@@ -243,6 +296,8 @@ def _from_env() -> dict[str, Any]:
         "allowed_chat_ids": get("ALLOWED_CHAT_IDS", ""),
         "bot_password": get("BOT_PASSWORD", ""),
         "ai_provider": get("AI_PROVIDER", "openai"),
+        "ai_pool_strategy": get("AI_POOL_STRATEGY", "round_robin"),
+        "ai_pool_primary": get("AI_POOL_PRIMARY", "ollama"),
         "openai_api_key": get("OPENAI_API_KEY", ""),
         "openai_model": get("OPENAI_MODEL", "gpt-4o-mini"),
         "ollama_base_url": get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
@@ -260,12 +315,15 @@ def _from_env() -> dict[str, Any]:
         "ai_retry_base_delay": float(get("AI_RETRY_BASE_DELAY", "1.0")),
         "ai_request_delay_seconds": float(get("AI_REQUEST_DELAY_SECONDS", "1.0")),
         "ai_concurrency": int(get("AI_CONCURRENCY", "1")),
+        "max_concurrent_ai_calls": int(get("MAX_CONCURRENT_AI_CALLS", "8")),
         "ai_per_receipt_timeout_seconds": int(get("AI_PER_RECEIPT_TIMEOUT_SECONDS", "120")),
         "ai_max_calls_per_run": int(get("AI_MAX_CALLS_PER_RUN", "100")),
+        "worker_count": int(get("WORKER_COUNT", "2")),
+        "max_queue_size": int(get("MAX_QUEUE_SIZE", "50")),
         "max_processing_seconds": float(get("MAX_PROCESSING_SECONDS", "600")),
         "telegram_timeout_seconds": int(get("TELEGRAM_TIMEOUT_SECONDS", "30")),
         "session_ttl_seconds": int(get("SESSION_TTL_SECONDS", "1800")),
-        "session_lease_ttl_seconds": int(get("SESSION_LEASE_TTL_SECONDS", "120")),
+        "lock_idle_seconds": int(get("LOCK_IDLE_SECONDS", "300")),
         "maintenance_interval_seconds": int(get("MAINTENANCE_INTERVAL_SECONDS", "60")),
         "log_level": get("LOG_LEVEL", "INFO"),
         "log_format": get("LOG_FORMAT", "text"),

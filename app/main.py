@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
@@ -21,6 +22,7 @@ from app.services.receipt_service import ProcessingService
 from app.services.security_service import SecurityService
 from app.services.session_service import SessionStore
 from app.services.telegram_service import TelegramService
+from app.utils import metrics
 from app.utils.singleton import InstanceLock
 
 logger = logging.getLogger(__name__)
@@ -32,17 +34,14 @@ async def _maintenance_loop(
     evict_idle=None,
     lock_idle_seconds: float = 0.0,
 ) -> None:
-    """Periodically run the session maintenance sweep (reclaim + purge) and
-    evict idle per-user locks so their memory does not grow unboundedly."""
+    """Periodically run the session maintenance sweep (purge expired sessions)
+    and evict idle per-user locks so their memory does not grow unboundedly."""
     while True:
         await asyncio.sleep(interval_seconds)
         try:
             result = await sweeper()
-            if result.get("reclaimed") or result.get("purged"):
-                logger.info(
-                    "maintenance sweep: reclaimed=%(reclaimed)d purged=%(purged)d",
-                    result,
-                )
+            if result.get("purged"):
+                logger.info("maintenance sweep: purged=%(purged)d", result)
         except Exception:
             logger.exception("maintenance sweep failed")
         if evict_idle is not None:
@@ -57,30 +56,38 @@ async def _maintenance_loop(
 def _make_post_init(
     sessions: SessionStore,
     interval_seconds: float,
-    locks=None,
+    bot,
     lock_idle_seconds: float = 0.0,
 ):
-    """Return a ``post_init`` that starts the maintenance task and tracks it.
+    """Return a ``post_init`` that starts the maintenance task and the job
+    queue workers, and tracks them for clean shutdown.
 
     PTB's ``Application`` uses ``__slots__``, so the task reference is held in a
     closure (never attached to the app object). ``post_shutdown`` cancels and
-    awaits the task so it is reaped cleanly at shutdown instead of leaking.
+    awaits the task and stops the workers so they are reaped cleanly at shutdown
+    instead of leaking.
     """
-    evict_idle = locks.evict_idle if locks is not None else None
+    evict_idle = bot.locks.evict_idle if bot is not None else None
     holder: dict = {"task": None}
 
     async def _post_shutdown(_app) -> None:
         task = holder["task"]
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        await bot.stop_workers()
 
     async def _post_init(application) -> None:
         application.post_shutdown = _post_shutdown
+        # The job queue is in-memory, so a restart loses queued jobs; notify
+        # affected users and reset their sessions so they can re-run /generate.
+        lost = await bot.notify_queued_lost()
+        if lost:
+            logger.warning("notified %d users their queued job was lost", lost)
+        bot.start_workers()
         holder["task"] = asyncio.get_running_loop().create_task(
             _maintenance_loop(
                 sessions.sweep,
@@ -97,14 +104,17 @@ def build_application(
     config: Config,
     sessions: SessionStore | None = None,
     ledger: ReceiptLedger | None = None,
-) -> Application:
-    """Assemble the PTB application from a validated config."""
+) -> tuple[Application, ReimbursementBot]:
+    """Assemble the PTB application from a validated config.
+
+    Returns ``(application, bot)`` so callers can reach the bot's queue and
+    locks (e.g. for the health server) without reaching into PTB internals.
+    """
     security = SecurityService(config)
     if sessions is None:
         sessions = SessionStore(
             db_path=config.data_dir / "sessions.db",
             ttl_seconds=config.session_ttl_seconds,
-            lease_ttl_seconds=config.session_lease_ttl_seconds,
         )
     if ledger is None:
         ledger = ReceiptLedger(config.data_dir / "receipts.db")
@@ -138,32 +148,39 @@ def build_application(
     app.post_init = _make_post_init(
         sessions,
         config.maintenance_interval_seconds,
-        bot.locks,
-        config.session_lease_ttl_seconds,
+        bot,
+        config.lock_idle_seconds,
     )
-    return app
+    return app, bot
 
 
-def _start_health_server(config: Config) -> None:
-    """Serve ``/health`` and ``/metrics`` in a daemon thread if enabled."""
+def _start_health_server(config: Config, metrics_provider=None) -> None:
+    """Serve ``/health`` and ``/metrics`` in a daemon thread if enabled.
+
+    ``metrics_provider``, when given, is called on each ``/metrics`` request to
+    build the payload (e.g. queue + lock stats merged with the counters).
+    """
     if not config.health_enabled:
         return
-    server = create_health_server(port=config.health_port, token=config.health_token)
+    server = create_health_server(
+        port=config.health_port,
+        token=config.health_token,
+        metrics_provider=metrics_provider or metrics.get_metrics,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info("health server listening on :%d", config.health_port)
 
 
-def main() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
-    try:
-        config = load_config()
-        config.validate_operational()
-    except ConfigError as exc:
-        raise SystemExit(f"Configuration error: {exc}") from exc
-    except ValueError as exc:
-        raise SystemExit(f"Configuration error: {exc}") from exc
+def _bootstrap(config: Config) -> tuple[SessionStore, ReceiptLedger, InstanceLock]:
+    """Resolve/create runtime dirs, take the single-instance lock, sweep orphaned
+    request dirs, and initialize + back up the durable state DBs.
 
+    Runs before :func:`build_application` so a non-writable or misconfigured
+    environment fails fast (``SystemExit``) and so backups happen before
+    serving. Returns the ready-to-use stores and the held lock so ``main`` can
+    release it on shutdown.
+    """
     # Resolve dirs to absolute paths, creating + verifying them writable up front.
     config.temp_dir = Path(config.temp_dir).resolve()
     config.data_dir = Path(config.data_dir).resolve()
@@ -195,23 +212,24 @@ def main() -> None:
 
     # Sweep orphaned request dirs from a previous hard kill (SIGKILL/OOM).
     logger.info(
-        "config: concurrency=%d request_delay=%.1fs retries=%d retry_delay=%.1fs "
-        "max_edge=%d TPM-aware_retry=yes",
+        "config: concurrency=%d effective_ai_concurrency=%d request_delay=%.1fs "
+        "retries=%d retry_delay=%.1fs max_edge=%d TPM-aware_retry=yes",
         config.ai_concurrency,
+        config.worker_count * config.ai_concurrency,
         config.ai_request_delay_seconds,
         config.ai_retry_attempts,
         config.ai_retry_base_delay,
         config.image_max_edge,
     )
-    swept = sweep_orphaned_requests(config.temp_dir)
+    swept = sweep_orphaned_requests(
+        config.temp_dir, age_seconds=config.max_processing_seconds or 600.0
+    )
     if swept:
         logger.warning("swept %d orphaned request dirs from %s", swept, config.temp_dir)
 
-    # Durable session store; purge stale sessions and abandoned leases first.
     sessions = SessionStore(
         db_path=config.data_dir / "sessions.db",
         ttl_seconds=config.session_ttl_seconds,
-        lease_ttl_seconds=config.session_lease_ttl_seconds,
     )
     purged = asyncio.run(sessions.purge_expired())
     if purged:
@@ -226,14 +244,46 @@ def main() -> None:
     except FileNotFoundError as exc:
         logger.warning("backup skipped: %s", exc)
 
-    application = build_application(config, sessions=sessions, ledger=ledger)
-    _start_health_server(config)
+    return sessions, ledger, instance_lock
+
+
+def _run_polling(application: Application, instance_lock: InstanceLock) -> None:
+    """Block on Telegram long-polling, releasing the instance lock on exit.
+
+    ``run_polling`` returns only on shutdown (or raises); either way the lock is
+    released. On SIGKILL/OOM the kernel releases it via fd close instead.
+    """
     try:
         application.run_polling(drop_pending_updates=True)
     finally:
         # Release the lock on clean shutdown; if we were SIGKILLed/OOM'd the
         # kernel already released it via fd close.
         instance_lock.release()
+
+
+def main() -> None:
+    load_dotenv(PROJECT_ROOT / ".env")
+    try:
+        config = load_config()
+        config.validate_operational()
+    except ConfigError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+
+    sessions, ledger, instance_lock = _bootstrap(config)
+
+    application, bot = build_application(config, sessions=sessions, ledger=ledger)
+
+    def _metrics_provider() -> dict[str, Any]:
+        """Merge the counter registry with live queue + lock stats."""
+        payload: dict[str, Any] = metrics.get_metrics()
+        payload["queue"] = bot.queue.stats()
+        payload["locks"] = bot.locks.stats()
+        return payload
+
+    _start_health_server(config, metrics_provider=_metrics_provider)
+    _run_polling(application, instance_lock)
 
 
 if __name__ == "__main__":

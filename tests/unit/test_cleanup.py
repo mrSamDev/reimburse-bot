@@ -28,7 +28,7 @@ def test_sweep_removes_orphaned_request_dirs(tmp_path):
     base = make_request_base(tmp_path, "dead1")
     (base / "input" / "a.img").write_bytes(b"x")
     make_request_base(tmp_path, "dead2")
-    removed = sweep_orphaned_requests(tmp_path)
+    removed = sweep_orphaned_requests(tmp_path, age_seconds=0)
     assert removed == 2
     assert list(tmp_path.iterdir()) == []
 
@@ -37,9 +37,31 @@ def test_sweep_ignores_non_request_entries(tmp_path):
     other = tmp_path / "keep_me.txt"
     other.write_text("data")
     make_request_base(tmp_path, "dead")
-    removed = sweep_orphaned_requests(tmp_path)
+    removed = sweep_orphaned_requests(tmp_path, age_seconds=0)
     assert removed == 1
     assert other.exists()
+
+
+def test_sweep_keeps_fresh_request_dirs(tmp_path):
+    """A request dir younger than the age threshold (possibly a live in-flight
+    batch from another instance) must NOT be swept."""
+    make_request_base(tmp_path, "fresh")
+    removed = sweep_orphaned_requests(tmp_path, age_seconds=600)
+    assert removed == 0
+    assert (tmp_path / "request_fresh").exists()
+
+
+def test_sweep_removes_old_request_dirs(tmp_path):
+    """A request dir older than the age threshold is a crash orphan and is swept."""
+    import os
+    import time
+
+    base = make_request_base(tmp_path, "old")
+    old = time.time() - 3600  # 1 hour old
+    os.utime(base, (old, old))
+    removed = sweep_orphaned_requests(tmp_path, age_seconds=600)
+    assert removed == 1
+    assert not base.exists()
 
 
 def test_sweep_empty_root_returns_zero(tmp_path):

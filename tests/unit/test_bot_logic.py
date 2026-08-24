@@ -127,7 +127,7 @@ def test_password_correct():
     s = Session(user_id=1, chat_id=1, state=BotState.AWAITING_PASSWORD)
     state, reply, correct = logic.handle_password(s, "secret", security=_sec())
     assert correct is True
-    assert state == BotState.PROCESSING
+    assert state == BotState.QUEUED
     assert reply is None
 
 

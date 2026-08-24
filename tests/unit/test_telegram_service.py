@@ -34,6 +34,9 @@ class FakeBot:
             raise RuntimeError("send failed")
         self.sent.append(caption)
 
+    async def send_message(self, chat_id, text):
+        self.sent.append(text)
+
     async def delete_message(self, chat_id, message_id):
         raise RuntimeError("cannot delete")
 
@@ -83,6 +86,13 @@ async def test_send_document_failure_raises(tmp_path):
     doc = make_image(tmp_path / "r.pdf", "JPEG")
     with pytest.raises(RuntimeError):
         await svc.send_document(1, doc)
+
+
+async def test_send_message(tmp_path):
+    bot = FakeBot()
+    svc = TelegramService(bot)
+    await svc.send_message(123, "hello")
+    assert bot.sent == ["hello"]
 
 
 async def test_delete_message_best_effort(tmp_path):

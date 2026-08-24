@@ -10,9 +10,11 @@ services:
     environment:
       - TEMP_DIR=/tmp/reimbursement
     # Temporary filesystem for in-flight request processing, owned by the
-    # non-root `bot` user (uid 1000) baked into the image.
+    # non-root `bot` user (uid 1000) baked into the image. Sized for several
+    # concurrent batches (each keeps raw + normalized images until the PDF is
+    # delivered); 64m overflowed under concurrent heavy users.
     tmpfs:
-      - /tmp/reimbursement:size=64m,mode=0770,uid=1000,gid=1000
+      - /tmp/reimbursement:size=512m,mode=0770,uid=1000,gid=1000
     # Durable state survives container rebuilds/restarts: SQLite audit ledger
     # (receipts.db), session store (sessions.db), and their backups. The image
     # pre-creates these dirs owned by uid 1000 so named volumes inherit them.
