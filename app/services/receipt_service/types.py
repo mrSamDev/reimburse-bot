@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from app.models.receipt import Batch, Receipt
@@ -48,6 +49,12 @@ def make_request_base(temp_root: str | Path, request_id: str) -> Path:
     return base
 
 
-def _pdf_filename(request_id: str) -> str:
-    date = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return f"reimbursement_{date}_{request_id}.pdf"
+def _pdf_filename(title: str, total_aed: Decimal) -> str:
+    """Build the report filename from the document title and AED total.
+
+    The title is sanitized for filesystem safety (spaces -> underscores,
+    reserved characters stripped).
+    """
+    safe_title = re.sub(r"[^\w\-]+", "_", title.strip()).strip("_") or "report"
+    total = total_aed.quantize(Decimal("0.01"))
+    return f"{safe_title}_{total}.pdf"

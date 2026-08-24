@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from app.ai.base import AIProviderError, ReceiptVisionProvider
@@ -210,7 +211,9 @@ class ProcessingService:
                 batch.review_count = sum(1 for r in batch.receipts if r.review_required)
 
                 _check_deadline()
-                out_pdf = output_dir / _pdf_filename(request_id)
+                doc_title = title or self._config.report_title
+                total_aed = batch.currency_totals.get("AED", Decimal("0"))
+                out_pdf = output_dir / _pdf_filename(doc_title, total_aed)
                 period = derive_report_period(batch.receipts)
                 if not period:
                     logger.warning(
@@ -222,7 +225,7 @@ class ProcessingService:
                     generate_report,
                     batch,
                     out_pdf,
-                    title=title or self._config.report_title,
+                    title=doc_title,
                     period=period,
                     image_map=image_map,
                 )

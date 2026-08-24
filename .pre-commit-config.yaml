@@ -33,3 +33,10 @@ repos:
           - pypdf==6.16.1
         types: [python]
         pass_filenames: false
+
+      - id: pi-review
+        name: pi (headless review of staged changes)
+        entry: scripts/pi-review.sh
+        language: system
+        types: [file]
+        pass_filenames: false
