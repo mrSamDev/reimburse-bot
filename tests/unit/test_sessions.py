@@ -652,3 +652,153 @@ def test_close_releases_connections(tmp_path):
         store._op_get(1)
 
 
+
+
+# ---- Migration from old schema versions (Fix #5) --------------------------
+
+
+def _session_columns(db) -> list[str]:
+    """Return column names from the sessions table."""
+    conn = sqlite3.connect(str(db))
+    try:
+        return [d[1] for d in conn.execute("PRAGMA table_info('sessions')").fetchall()]
+    finally:
+        conn.close()
+
+
+def _session_indexes(db) -> set[str]:
+    conn = sqlite3.connect(str(db))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA index_list('sessions')").fetchall()}
+    finally:
+        conn.close()
+
+
+def _create_v1_sessions_db(path):
+    """Create a sessions DB at schema version 1 (the original schema)."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            receipt_file_ids TEXT NOT NULL,
+            processing INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (user_id, chat_id, state, receipt_file_ids, "
+        "processing, created_at, updated_at) "
+        "VALUES (1, 100, 'IDLE', '[\"f1\"]', 0, "
+        f"'{now}', '{now}')"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+
+def test_session_db_migrates_from_v1(tmp_path):
+    """A sessions DB at schema version 1 migrates to the current version.
+
+    Version 1 has no ``lease_expiry`` (added in v2, dropped in v5),
+    ``report_title`` (added in v3), or ``idx_sessions_updated_at`` index (v4).
+    The migration must bring all of these along without losing data.
+    """
+    db_path = tmp_path / "sessions.db"
+    _create_v1_sessions_db(db_path)
+
+    # Opening with SessionStore triggers _migrate().
+    store = SessionStore(db_path)
+
+    # Schema version is current.
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    conn.close()
+
+    # Columns match a fresh DB (which includes report_title but not lease_expiry).
+    fresh = SessionStore(tmp_path / "fresh.db")
+    fresh_cols = _session_columns(tmp_path / "fresh.db")
+    fresh.close()
+    migrated_cols = _session_columns(db_path)
+    assert migrated_cols == fresh_cols
+
+    # lease_expiry was added (v2) then dropped (v5) — not in final schema.
+    assert "lease_expiry" not in migrated_cols
+
+    # report_title was added in v3.
+    assert "report_title" in migrated_cols
+
+    # Index was created in v4.
+    assert "idx_sessions_updated_at" in _session_indexes(db_path)
+
+    # Data survived the migration.
+    session = store._op_get(1)
+    assert session.user_id == 1
+    assert session.chat_id == 100
+    assert session.state == BotState.IDLE
+    assert session.receipt_file_ids == ["f1"]
+    assert session.report_title == ""  # added by migration with default ''
+
+    store.close()
+
+
+def _create_v3_sessions_db(path):
+    """Create a sessions DB at schema version 3 (has lease_expiry, report_title)."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            receipt_file_ids TEXT NOT NULL,
+            processing INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            lease_expiry TEXT,
+            report_title TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (user_id, chat_id, state, receipt_file_ids, "
+        "processing, created_at, updated_at, lease_expiry, report_title) "
+        "VALUES (2, 200, 'COLLECTING', '[\"f1\",\"f2\"]', 0, "
+        f"'{now}', '{now}', '{now}', 'July Expenses')"
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+
+def test_session_db_migrates_from_v3_with_lease_expiry(tmp_path):
+    """A DB at v3 (with lease_expiry) migrates to v5 (lease_expiry dropped).
+
+    This is the migration path for existing production DBs that were created
+    before the cross-process lease was removed. The ``lease_expiry`` column
+    must be dropped cleanly without losing other data.
+    """
+    db_path = tmp_path / "sessions.db"
+    _create_v3_sessions_db(db_path)
+
+    store = SessionStore(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    conn.close()
+
+    # lease_expiry is gone.
+    cols = _session_columns(db_path)
+    assert "lease_expiry" not in cols
+
+    # Data survived (including the report_title that was set before migration).
+    session = store._op_get(2)
+    assert session.user_id == 2
+    assert session.report_title == "July Expenses"
+    assert session.receipt_file_ids == ["f1", "f2"]
+
+    store.close()
