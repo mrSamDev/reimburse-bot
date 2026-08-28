@@ -112,3 +112,105 @@ def test_build_provider_pool_priority():
     )
     p = build_provider(cfg)
     assert isinstance(p, ProviderPool)
+
+
+# ---- Circuit breaker (Fix #3) ---------------------------------------------
+
+
+def test_circuit_opens_after_consecutive_failures():
+    """A provider that fails N times in a row gets skipped (circuit opens)."""
+    a, b = _fail("a"), _ok("b")
+    pool = ProviderPool(
+        [a, b], strategy="priority", primary=a,
+        failure_threshold=3, cooldown_seconds=60,
+    )
+    # 3 extractions — each tries a first (fails) then falls back to b.
+    for _ in range(3):
+        pool.extract_receipt("x")
+    # After 3 consecutive failures, a's circuit is open.
+    assert a.calls == 3
+    # Now a should be skipped entirely; only b is called.
+    pool.extract_receipt("x")
+    assert a.calls == 3  # not called again
+    assert b.calls == 4
+
+
+def test_circuit_resets_on_success():
+    """A successful call resets the failure counter."""
+    class _Recoverable(ReceiptVisionProvider):
+        def __init__(self):
+            self.calls = 0
+            self.fail_until = 2
+
+        def extract_receipt(self, image_path):
+            self.calls += 1
+            if self.calls <= self.fail_until:
+                raise AIProviderError("transient")
+            return ReceiptExtraction(merchant_name="a", total="10", confidence=0.9)
+
+    a = _Recoverable()
+    b = _ok("b")
+    pool = ProviderPool(
+        [a, b], strategy="priority", primary=a,
+        failure_threshold=3, cooldown_seconds=60,
+    )
+    # Call 1: a fails (1), b succeeds.
+    pool.extract_receipt("x")
+    # Call 2: a fails (2), b succeeds.
+    pool.extract_receipt("x")
+    # Call 3: a succeeds (3) — resets the breaker.
+    pool.extract_receipt("x")
+    assert a.calls == 3
+    # Now a has 0 failures. It should be tried again on the next call.
+    pool.extract_receipt("x")
+    assert a.calls == 4  # a was called (not skipped)
+
+
+def test_circuit_closes_after_cooldown():
+    """After the cooldown window, the provider is tried again."""
+    a, b = _fail("a"), _ok("b")
+    now = [100.0]
+    pool = ProviderPool(
+        [a, b], strategy="priority", primary=a,
+        failure_threshold=2, cooldown_seconds=30,
+        _now=lambda: now[0],
+    )
+    # 2 failures → circuit opens (until t=130).
+    pool.extract_receipt("x")
+    pool.extract_receipt("x")
+    assert a.calls == 2
+    # a is skipped while the circuit is open.
+    pool.extract_receipt("x")
+    assert a.calls == 2
+    # After cooldown, a is tried again.
+    now[0] = 131.0
+    pool.extract_receipt("x")
+    assert a.calls == 3  # a was retried
+
+
+def test_all_circuits_open_tries_anyway():
+    """If every provider's circuit is open, try them all (better than nothing)."""
+    a, b = _fail("a"), _fail("b")
+    now = [100.0]
+    pool = ProviderPool(
+        [a, b], strategy="priority", primary=a,
+        failure_threshold=1, cooldown_seconds=60,
+        _now=lambda: now[0],
+    )
+    # Both fail once → both circuits open.
+    with pytest.raises(AIProviderError):
+        pool.extract_receipt("x")
+    assert a.calls == 1
+    assert b.calls == 1
+    # Now both circuits are open, but we still try (and fail).
+    with pytest.raises(AIProviderError):
+        pool.extract_receipt("x")
+    assert a.calls == 2  # tried despite open circuit
+    assert b.calls == 2
+
+
+def test_circuit_breaker_default_threshold():
+    """The default circuit breaker threshold is 3 consecutive failures."""
+    pool = ProviderPool([_ok("a"), _ok("b")], strategy="round_robin")
+    assert pool._breaker_threshold == 3
+    assert pool._breaker_cooldown == 60.0
