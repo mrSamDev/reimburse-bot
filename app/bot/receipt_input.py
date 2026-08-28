@@ -63,7 +63,7 @@ class ReceiptInputMixin(_BotBase):
                 await self.sessions.save(session)
                 await self._reply(update, msg.DUPLICATE_RECEIPT)
                 return
-            session.receipt_file_ids = session.receipt_file_ids + [file_id]
+            session.add_file_id(file_id)  # keep in-memory snapshot in sync
         await self.sessions.save(session)
         if reply:
             await self._reply(update, reply)

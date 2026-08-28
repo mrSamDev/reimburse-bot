@@ -48,6 +48,41 @@ def test_clear_receipts():
     assert s.receipt_file_ids == []
 
 
+# ---- receipt_file_ids read-only property (Fix #2) -------------------------
+
+def test_receipt_file_ids_assignment_raises():
+    """Direct assignment to receipt_file_ids is blocked — the field is read-only.
+
+    This prevents the silent footgun where ``save()`` drops receipt_file_ids
+    changes because ``_upsert`` deliberately doesn't persist the list.
+    Use ``add_file_id()`` / ``clear_receipts()`` or the store's atomic SQL path.
+    """
+    s = Session(user_id=1, chat_id=1)
+    with pytest.raises(AttributeError, match="read-only"):
+        s.receipt_file_ids = ["f1"]
+
+
+def test_receipt_file_ids_constructable():
+    """Session construction with receipt_file_ids=... still works."""
+    s = Session(user_id=1, chat_id=1, receipt_file_ids=["f1", "f2"])
+    assert s.receipt_file_ids == ["f1", "f2"]
+
+
+def test_receipt_file_ids_in_place_mutation_works():
+    """add_file_id mutates the list in place (no field reassignment)."""
+    s = Session(user_id=1, chat_id=1)
+    assert s.add_file_id("f1") is True
+    assert s.receipt_file_ids == ["f1"]
+    assert s.add_file_id("f1") is False  # duplicate
+
+
+def test_clear_receipts_on_read_only_field():
+    """clear_receipts empties the read-only list."""
+    s = Session(user_id=1, chat_id=1, receipt_file_ids=["f1", "f2"])
+    s.clear_receipts()
+    assert s.receipt_file_ids == []
+
+
 def test_touch_updates_updated_at():
     s = Session(user_id=1, chat_id=1)
     before = s.updated_at

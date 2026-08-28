@@ -118,9 +118,8 @@ class JobProcessor:
                 if delivered:
                     # Clear staged receipts only on confirmed delivery so a failed
                     # send is retryable without re-uploading (crash window may dup).
-                    session.report_title = ""
-                    session.receipt_file_ids = []
-                    await self._sessions.clear_receipts(job.user_id)
+                    session.clear_receipts()  # clears in-memory list + report_title
+                    await self._sessions.clear_receipts(job.user_id)  # atomic SQL clear
                 await self._sessions.save(session)
 
     async def _notify(self, chat_id: int, text: str) -> None:
