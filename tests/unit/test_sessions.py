@@ -1,6 +1,7 @@
 """Tests for the Session model and SQLite-backed SessionStore."""
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -573,5 +574,46 @@ async def test_write_waits_under_contention_not_locked_error(tmp_path):
     t.join(timeout=5)
     assert errors == []
     assert (await store.get(1)).chat_id == 123
+
+
+# ---- Connection reuse (Fix #1: persistent thread-local connections) --------
+
+
+def test_connection_reused_across_sync_ops(tmp_path, monkeypatch):
+    """A persistent thread-local connection is reused, not opened per-operation.
+
+    With the old connection-per-operation pattern, each ``_op_*`` call opened a
+    new SQLite connection. With persistent thread-local connections, the same
+    thread reuses one connection across all operations.
+    """
+    original_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("database"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+    store = SessionStore(_db(tmp_path))
+    initial = len(calls)  # migration opens a connection
+    assert initial >= 1
+
+    store._op_get(1)
+    store._op_add_file_id(1, "f1")
+    store._op_get(1)
+    store._op_clear_receipts(1)
+    store._op_get(1)
+
+    # No new connections should have been opened for these operations.
+    assert len(calls) == initial
+
+
+def test_close_releases_connections(tmp_path):
+    """close() releases all connections; further use raises."""
+    store = SessionStore(_db(tmp_path))
+    store._op_get(1)  # creates the thread-local connection
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store._op_get(1)
 
 

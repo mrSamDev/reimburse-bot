@@ -247,3 +247,39 @@ def test_summary_counts(tmp_path):
     assert s["failed"] == 1
     assert s["delivered"] == 1
     assert s["total"] == 4
+
+
+# ---- Connection reuse (Fix #1: persistent thread-local connections) --------
+
+
+def test_ledger_connection_reused_across_sync_ops(tmp_path, monkeypatch):
+    """A persistent thread-local connection is reused, not opened per-operation."""
+    original_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("database"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    initial = len(calls)  # migration opens a connection
+    assert initial >= 1
+
+    lg.insert(_entry("f1"))
+    lg.count()
+    lg.by_user(1)
+    lg.summary()
+    lg.all()
+
+    # No new connections should have been opened for these operations.
+    assert len(calls) == initial
+
+
+def test_ledger_close_releases_connections(tmp_path):
+    """close() releases all connections; further use raises."""
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1"))  # creates the thread-local connection
+    lg.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        lg.count()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -66,39 +67,58 @@ class ReceiptLedger:
     failed ones carry ``status='failed'`` with a ``failure_reason`` and no total.
     Idempotent by ``file_id`` so a re-run after a crash never double-counts.
 
-    A fresh connection is opened per operation with WAL mode, safe to call from
-    worker threads via ``asyncio.to_thread``.
+    Uses thread-local persistent connections (one per calling thread) so WAL
+    mode and busy_timeout are set once, not re-executed per operation.
     """
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._conn_lock = threading.Lock()
+        self._closed = False
         self._migrate()
 
-    def _migrate(self) -> None:
-        """Bring the schema up to ``_SCHEMA_VERSION`` via ``PRAGMA user_version``."""
-        conn = self._connect()
-        try:
-            current = conn.execute("PRAGMA user_version").fetchone()[0]
-            for version in range(current + 1, _SCHEMA_VERSION + 1):
-                sql = _MIGRATIONS.get(version)
-                if sql:
-                    conn.executescript(sql)
-                conn.execute(f"PRAGMA user_version = {version}")
-            conn.commit()
-        finally:
-            conn.close()
-
-    def _connect(self) -> sqlite3.Connection:
-        # Explicit busy timeout (10s) so writes wait out lock contention rather
-        # than failing with "database is locked" under concurrent instances.
+    def _connection(self) -> sqlite3.Connection:
+        """Return the calling thread's persistent connection, creating it if needed."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
+        if self._closed:
+            raise RuntimeError("ReceiptLedger is closed")
         conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA journal_mode=WAL")
+        self._local.conn = conn
+        with self._conn_lock:
+            self._connections.append(conn)
         return conn
 
+    def close(self) -> None:
+        """Close all thread-local connections (shutdown)."""
+        with self._conn_lock:
+            self._closed = True
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._connections.clear()
+
+    def _migrate(self) -> None:
+        """Bring the schema up to ``_SCHEMA_VERSION`` via ``PRAGMA user_version``."""
+        conn = self._connection()
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        for version in range(current + 1, _SCHEMA_VERSION + 1):
+            sql = _MIGRATIONS.get(version)
+            if sql:
+                conn.executescript(sql)
+            conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+
     def _insert_row(self, row: tuple) -> bool:
-        conn = self._connect()
+        conn = self._connection()
         try:
             cur = conn.execute(
                 f"INSERT OR IGNORE INTO receipts ({', '.join(_COLUMNS)}) "
@@ -107,8 +127,9 @@ class ReceiptLedger:
             )
             conn.commit()
             return cur.rowcount == 1
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     def insert(self, entry: dict[str, Any]) -> bool:
         """Insert an accepted receipt; True if newly inserted, False on dup file_id."""
@@ -157,7 +178,7 @@ class ReceiptLedger:
 
         Failed rows are never marked delivered. Returns how many rows touched.
         """
-        conn = self._connect()
+        conn = self._connection()
         try:
             cur = conn.execute(
                 "UPDATE receipts SET delivered_at = ? WHERE request_id = ? "
@@ -166,8 +187,9 @@ class ReceiptLedger:
             )
             conn.commit()
             return cur.rowcount
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     def backup(self, target_dir: str | Path, *, retention: int | None = None) -> Path:
         """Write a durable copy of the audit ledger DB into ``target_dir``."""
@@ -175,28 +197,22 @@ class ReceiptLedger:
 
     def summary(self) -> dict[str, int]:
         """Aggregate counts for a period-less reconciliation."""
-        conn = self._connect()
-        try:
-            accepted = conn.execute(
-                "SELECT COUNT(*) FROM receipts WHERE status = 'accepted'"
-            ).fetchone()[0]
-            failed = conn.execute(
-                "SELECT COUNT(*) FROM receipts WHERE status = 'failed'"
-            ).fetchone()[0]
-            delivered = conn.execute(
-                "SELECT COUNT(*) FROM receipts WHERE delivered_at IS NOT NULL"
-            ).fetchone()[0]
-        finally:
-            conn.close()
+        conn = self._connection()
+        accepted = conn.execute(
+            "SELECT COUNT(*) FROM receipts WHERE status = 'accepted'"
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT COUNT(*) FROM receipts WHERE status = 'failed'"
+        ).fetchone()[0]
+        delivered = conn.execute(
+            "SELECT COUNT(*) FROM receipts WHERE delivered_at IS NOT NULL"
+        ).fetchone()[0]
         return {"accepted": accepted, "failed": failed, "delivered": delivered,
                 "total": accepted + failed}
 
     def count(self) -> int:
-        conn = self._connect()
-        try:
-            return conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
-        finally:
-            conn.close()
+        conn = self._connection()
+        return conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
 
     def by_user(self, user_id: int) -> list[dict[str, Any]]:
         """Return every receipt for one user, oldest-first, ``total`` as Decimal."""
@@ -207,12 +223,9 @@ class ReceiptLedger:
         return self._fetch("ORDER BY id", ())
 
     def _fetch(self, where: str, params: tuple) -> list[dict[str, Any]]:
-        conn = self._connect()
-        try:
-            rows = conn.execute(f"SELECT * FROM receipts {where}", params).fetchall()
-            cols = [d[0] for d in conn.execute("SELECT * FROM receipts LIMIT 0").description]
-        finally:
-            conn.close()
+        conn = self._connection()
+        rows = conn.execute(f"SELECT * FROM receipts {where}", params).fetchall()
+        cols = [d[0] for d in conn.execute("SELECT * FROM receipts LIMIT 0").description]
         out = []
         for r in rows:
             d = dict(zip(cols, r, strict=True))
