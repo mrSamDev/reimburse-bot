@@ -38,12 +38,9 @@ def _money(value: Decimal) -> str:
 
 
 def _receipt_text(receipt: Receipt) -> str:
-    """Merchant, date and (when flagged) a review warning, XML-escaped."""
+    """Merchant and date, XML-escaped. Review flags go to the Telegram caption."""
     parts = [escape(receipt.merchant_name)]
     parts.append(escape(receipt.display_date()))
-    if receipt.review_required:
-        warn = (receipt.notes or "").strip() or "Review required"
-        parts.append(f"⚠ <b>Review required:</b> {escape(warn)}")
     return "<br/>".join(parts)
 
 

@@ -19,6 +19,8 @@ RULES
   handwritten, or partially cut off.
 - `merchant_name` should be the merchant or receipt description (for rides this is a
   readable description such as "Ride with <driver> — <date>").
+- `phone_number` is a contact/mobile number printed on the receipt (driver, vendor,
+  or support number), exactly as shown. Return null when not visible.
 - `transaction_date` is the date string exactly as it appears on the receipt, if
   visible. Do not reformat it. Return null when not visible.
 - Use `notes` for anything notable, e.g. missing data, ambiguous totals, or obvious
@@ -28,6 +30,7 @@ Respond with a single JSON object only, using exactly this schema:
 
 {
   "merchant_name": "string or null",
+  "phone_number": "string or null",
   "transaction_date": "string or null",
   "currency": "ISO 4217 code or null",
   "subtotal": "number or null",

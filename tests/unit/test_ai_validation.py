@@ -52,7 +52,7 @@ def test_invalid_currency_rejected():
 
 
 def test_malformed_json_not_a_dict_raises():
-    # Simulates provider output that isn't a dict at all (no merchant_name).
+    # Simulates provider output that isn't dict-shaped (no total, no merchant).
     with pytest.raises(AIValidationError):
         _validate({"bad": True})
 
@@ -62,9 +62,37 @@ def test_low_confidence_flags_review():
     assert r.review_required is True
 
 
-def test_missing_merchant_name_rejected():
+def test_missing_merchant_name_falls_back_to_phone_number():
+    r = _validate({"total": 10, "phone_number": "0501234567", "confidence": 0.9})
+    assert r.merchant_name == "0501234567"
+    assert r.review_required is True
+    assert "Merchant name missing" in r.notes
+
+
+def test_phone_number_takes_precedence_over_date():
+    r = _validate(
+        {"total": 10, "phone_number": 501234567, "transaction_date": "29/06/2026"}
+    )
+    assert r.merchant_name == "501234567"
+
+
+def test_missing_merchant_name_falls_back_to_date():
+    r = _validate({"total": 10, "transaction_date": "29/06/2026", "confidence": 0.9})
+    assert r.merchant_name == "29/06/2026"
+    assert r.review_required is True
+    assert "Merchant name missing" in r.notes
+
+
+def test_missing_merchant_name_and_date_falls_back_to_unknown():
+    r = _validate({"total": 10})
+    assert r.merchant_name == "Unknown"
+    assert r.review_required is True
+    assert "Merchant name missing" in r.notes
+
+
+def test_missing_total_still_rejected():
     with pytest.raises(AIValidationError):
-        _validate({"total": 10, "confidence": 0.9})
+        _validate({"transaction_date": "29/06/2026", "confidence": 0.9})
 
 
 def test_never_accepts_raw_ai_dict():

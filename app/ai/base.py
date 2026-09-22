@@ -20,6 +20,7 @@ class ReceiptExtraction(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
 
     merchant_name: str | None = None
+    phone_number: str | None = None
     transaction_date: str | None = None
     currency: str | None = None
     subtotal: Decimal | None = None
@@ -38,6 +39,13 @@ class ReceiptExtraction(BaseModel):
             return Decimal(str(v))
         except Exception as exc:
             raise ValueError(f"invalid monetary value {v!r}") from exc
+
+    @field_validator("phone_number", mode="before")
+    @classmethod
+    def _phone(cls, v: Any) -> str | None:
+        if v is None or v == "":
+            return None
+        return str(v).strip() or None
 
     @field_validator("confidence", mode="before")
     @classmethod
