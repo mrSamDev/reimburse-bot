@@ -1,6 +1,7 @@
 """Tests for the Session model and SQLite-backed SessionStore."""
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -43,6 +44,41 @@ def test_duplicate_file_id_not_added():
 def test_clear_receipts():
     s = Session(user_id=1, chat_id=1)
     s.add_file_id("f1")
+    s.clear_receipts()
+    assert s.receipt_file_ids == []
+
+
+# ---- receipt_file_ids read-only property (Fix #2) -------------------------
+
+def test_receipt_file_ids_assignment_raises():
+    """Direct assignment to receipt_file_ids is blocked — the field is read-only.
+
+    This prevents the silent footgun where ``save()`` drops receipt_file_ids
+    changes because ``_upsert`` deliberately doesn't persist the list.
+    Use ``add_file_id()`` / ``clear_receipts()`` or the store's atomic SQL path.
+    """
+    s = Session(user_id=1, chat_id=1)
+    with pytest.raises(AttributeError, match="read-only"):
+        s.receipt_file_ids = ["f1"]
+
+
+def test_receipt_file_ids_constructable():
+    """Session construction with receipt_file_ids=... still works."""
+    s = Session(user_id=1, chat_id=1, receipt_file_ids=["f1", "f2"])
+    assert s.receipt_file_ids == ["f1", "f2"]
+
+
+def test_receipt_file_ids_in_place_mutation_works():
+    """add_file_id mutates the list in place (no field reassignment)."""
+    s = Session(user_id=1, chat_id=1)
+    assert s.add_file_id("f1") is True
+    assert s.receipt_file_ids == ["f1"]
+    assert s.add_file_id("f1") is False  # duplicate
+
+
+def test_clear_receipts_on_read_only_field():
+    """clear_receipts empties the read-only list."""
+    s = Session(user_id=1, chat_id=1, receipt_file_ids=["f1", "f2"])
     s.clear_receipts()
     assert s.receipt_file_ids == []
 
@@ -575,3 +611,194 @@ async def test_write_waits_under_contention_not_locked_error(tmp_path):
     assert (await store.get(1)).chat_id == 123
 
 
+# ---- Connection reuse (Fix #1: persistent thread-local connections) --------
+
+
+def test_connection_reused_across_sync_ops(tmp_path, monkeypatch):
+    """A persistent thread-local connection is reused, not opened per-operation.
+
+    With the old connection-per-operation pattern, each ``_op_*`` call opened a
+    new SQLite connection. With persistent thread-local connections, the same
+    thread reuses one connection across all operations.
+    """
+    original_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("database"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+    store = SessionStore(_db(tmp_path))
+    initial = len(calls)  # migration opens a connection
+    assert initial >= 1
+
+    store._op_get(1)
+    store._op_add_file_id(1, "f1")
+    store._op_get(1)
+    store._op_clear_receipts(1)
+    store._op_get(1)
+
+    # No new connections should have been opened for these operations.
+    assert len(calls) == initial
+
+
+def test_close_releases_connections(tmp_path):
+    """close() releases all connections; further use raises."""
+    store = SessionStore(_db(tmp_path))
+    store._op_get(1)  # creates the thread-local connection
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store._op_get(1)
+
+
+
+
+# ---- Migration from old schema versions (Fix #5) --------------------------
+
+
+def _session_columns(db) -> list[str]:
+    """Return column names from the sessions table."""
+    conn = sqlite3.connect(str(db))
+    try:
+        return [d[1] for d in conn.execute("PRAGMA table_info('sessions')").fetchall()]
+    finally:
+        conn.close()
+
+
+def _session_indexes(db) -> set[str]:
+    conn = sqlite3.connect(str(db))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA index_list('sessions')").fetchall()}
+    finally:
+        conn.close()
+
+
+def _create_v1_sessions_db(path):
+    """Create a sessions DB at schema version 1 (the original schema)."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            receipt_file_ids TEXT NOT NULL,
+            processing INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (user_id, chat_id, state, receipt_file_ids, "
+        "processing, created_at, updated_at) "
+        "VALUES (1, 100, 'IDLE', '[\"f1\"]', 0, "
+        f"'{now}', '{now}')"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+
+def test_session_db_migrates_from_v1(tmp_path):
+    """A sessions DB at schema version 1 migrates to the current version.
+
+    Version 1 has no ``lease_expiry`` (added in v2, dropped in v5),
+    ``report_title`` (added in v3), or ``idx_sessions_updated_at`` index (v4).
+    The migration must bring all of these along without losing data.
+    """
+    db_path = tmp_path / "sessions.db"
+    _create_v1_sessions_db(db_path)
+
+    # Opening with SessionStore triggers _migrate().
+    store = SessionStore(db_path)
+
+    # Schema version is current.
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    conn.close()
+
+    # Columns match a fresh DB (which includes report_title but not lease_expiry).
+    fresh = SessionStore(tmp_path / "fresh.db")
+    fresh_cols = _session_columns(tmp_path / "fresh.db")
+    fresh.close()
+    migrated_cols = _session_columns(db_path)
+    assert migrated_cols == fresh_cols
+
+    # lease_expiry was added (v2) then dropped (v5) — not in final schema.
+    assert "lease_expiry" not in migrated_cols
+
+    # report_title was added in v3.
+    assert "report_title" in migrated_cols
+
+    # Index was created in v4.
+    assert "idx_sessions_updated_at" in _session_indexes(db_path)
+
+    # Data survived the migration.
+    session = store._op_get(1)
+    assert session.user_id == 1
+    assert session.chat_id == 100
+    assert session.state == BotState.IDLE
+    assert session.receipt_file_ids == ["f1"]
+    assert session.report_title == ""  # added by migration with default ''
+
+    store.close()
+
+
+def _create_v3_sessions_db(path):
+    """Create a sessions DB at schema version 3 (has lease_expiry, report_title)."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            receipt_file_ids TEXT NOT NULL,
+            processing INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            lease_expiry TEXT,
+            report_title TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    conn.execute(
+        "INSERT INTO sessions (user_id, chat_id, state, receipt_file_ids, "
+        "processing, created_at, updated_at, lease_expiry, report_title) "
+        "VALUES (2, 200, 'COLLECTING', '[\"f1\",\"f2\"]', 0, "
+        f"'{now}', '{now}', '{now}', 'July Expenses')"
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+
+def test_session_db_migrates_from_v3_with_lease_expiry(tmp_path):
+    """A DB at v3 (with lease_expiry) migrates to v5 (lease_expiry dropped).
+
+    This is the migration path for existing production DBs that were created
+    before the cross-process lease was removed. The ``lease_expiry`` column
+    must be dropped cleanly without losing other data.
+    """
+    db_path = tmp_path / "sessions.db"
+    _create_v3_sessions_db(db_path)
+
+    store = SessionStore(db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    conn.close()
+
+    # lease_expiry is gone.
+    cols = _session_columns(db_path)
+    assert "lease_expiry" not in cols
+
+    # Data survived (including the report_title that was set before migration).
+    session = store._op_get(2)
+    assert session.user_id == 2
+    assert session.report_title == "July Expenses"
+    assert session.receipt_file_ids == ["f1", "f2"]
+
+    store.close()

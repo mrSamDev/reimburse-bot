@@ -283,7 +283,11 @@ def main() -> None:
         return payload
 
     _start_health_server(config, metrics_provider=_metrics_provider)
-    _run_polling(application, instance_lock)
+    try:
+        _run_polling(application, instance_lock)
+    finally:
+        sessions.close()
+        ledger.close()
 
 
 if __name__ == "__main__":

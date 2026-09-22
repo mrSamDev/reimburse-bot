@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,28 +72,57 @@ class SessionStore:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ttl = ttl_seconds
+        # Thread-local persistent connections: each thread that calls an _op_*
+        # method gets one connection reused across all its operations, instead
+        # of opening/closing a connection per call. This eliminates connection
+        # churn and re-executing WAL pragmas on every operation.
+        self._local = threading.local()
+        self._connections: list[sqlite3.Connection] = []
+        self._conn_lock = threading.Lock()
+        self._closed = False
         self._migrate()
 
-    def _connect(self) -> sqlite3.Connection:
-        # Busy timeout: wait for the lock instead of failing under concurrency.
+    def _connection(self) -> sqlite3.Connection:
+        """Return the calling thread's persistent connection, creating it if needed.
+
+        WAL mode and busy_timeout are set once per connection (not per operation).
+        Connections are tracked so :meth:`close` can release them all at shutdown.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
+        if self._closed:
+            raise RuntimeError("SessionStore is closed")
+        # check_same_thread stays True (default): each thread owns its connection.
         conn = sqlite3.connect(str(self._db_path), timeout=10.0)
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
+        self._local.conn = conn
+        with self._conn_lock:
+            self._connections.append(conn)
         return conn
 
+    def close(self) -> None:
+        """Close all thread-local connections (shutdown)."""
+        with self._conn_lock:
+            self._closed = True
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._connections.clear()
+
     def _migrate(self) -> None:
-        conn = self._connect()
-        try:
-            current = conn.execute("PRAGMA user_version").fetchone()[0]
-            for version in range(current + 1, _SCHEMA_VERSION + 1):
-                sql = _MIGRATIONS.get(version)
-                if sql:
-                    conn.executescript(sql)
-                conn.execute(f"PRAGMA user_version = {version}")
-            conn.commit()
-        finally:
-            conn.close()
+        conn = self._connection()
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        for version in range(current + 1, _SCHEMA_VERSION + 1):
+            sql = _MIGRATIONS.get(version)
+            if sql:
+                conn.executescript(sql)
+            conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         return Session(
@@ -117,22 +147,19 @@ class SessionStore:
         )
 
     def _load(self, user_id: int) -> Session | None:
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT * FROM sessions WHERE user_id = ?", (user_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            session = self._row_to_session(row)
-            if session.is_expired(self._ttl):
-                return None  # expired on read -> treated as absent
-            return session
-        finally:
-            conn.close()
+        conn = self._connection()
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        session = self._row_to_session(row)
+        if session.is_expired(self._ttl):
+            return None  # expired on read -> treated as absent
+        return session
 
     def _upsert(self, session: Session) -> None:
-        conn = self._connect()
+        conn = self._connection()
         try:
             # ``receipt_file_ids`` mutated only via atomic add/clear so save()
             # never clobbers a concurrent append (atomic-append lost-update fix).
@@ -146,8 +173,9 @@ class SessionStore:
                 self._session_to_row(session),
             )
             conn.commit()
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _op_get(self, user_id: int) -> Session:
         session = self._load(user_id)
@@ -184,7 +212,7 @@ class SessionStore:
     def _op_add_file_id(self, user_id: int, file_id: str) -> bool:
         """Append ``file_id`` atomically if not already present."""
         now = _utc_now()
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
@@ -200,15 +228,16 @@ class SessionStore:
             )
             conn.commit()
             return cur.rowcount == 1
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def add_file_id(self, user_id: int, file_id: str) -> bool:
         return await asyncio.to_thread(self._op_add_file_id, user_id, file_id)
 
     def _op_clear_receipts(self, user_id: int) -> None:
         """Atomically clear a user's staged receipts and report title."""
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute(
                 "UPDATE sessions SET receipt_file_ids = '[]', report_title = '', "
@@ -216,19 +245,21 @@ class SessionStore:
                 (_utc_now(), user_id),
             )
             conn.commit()
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def clear_receipts(self, user_id: int) -> None:
         return await asyncio.to_thread(self._op_clear_receipts, user_id)
 
     def _op_clear(self, user_id: int) -> None:
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             conn.commit()
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def clear(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_clear, user_id)
@@ -241,7 +272,7 @@ class SessionStore:
         processing flag. Safe only because ``notify_queued_lost`` runs in
         ``_post_init`` before ``start_workers()``.
         """
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute("UPDATE sessions SET processing = 0 WHERE processing = 1")
             cur = conn.execute(
@@ -250,8 +281,9 @@ class SessionStore:
             )
             conn.commit()
             return cur.rowcount
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def reset_stale(self) -> int:
         return await asyncio.to_thread(self._op_reset_stale)
@@ -260,16 +292,13 @@ class SessionStore:
         """Return ``(user_id, chat_id)`` for sessions stuck in QUEUED or
         PROCESSING, or with a stuck processing flag (a crash between the claim
         and the state save), so the user is notified their job was lost (sync)."""
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                "SELECT user_id, chat_id FROM sessions "
-                "WHERE state IN (?, ?) OR processing = 1",
-                (BotState.QUEUED.value, BotState.PROCESSING.value),
-            ).fetchall()
-            return [(r["user_id"], r["chat_id"]) for r in rows]
-        finally:
-            conn.close()
+        conn = self._connection()
+        rows = conn.execute(
+            "SELECT user_id, chat_id FROM sessions "
+            "WHERE state IN (?, ?) OR processing = 1",
+            (BotState.QUEUED.value, BotState.PROCESSING.value),
+        ).fetchall()
+        return [(r["user_id"], r["chat_id"]) for r in rows]
 
     async def get_stale(self) -> list[tuple[int, int]]:
         return await asyncio.to_thread(self._op_get_stale)
@@ -283,15 +312,16 @@ class SessionStore:
         comparison is chronologically correct.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=self._ttl)).isoformat()
-        conn = self._connect()
+        conn = self._connection()
         try:
             cur = conn.execute(
                 "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
             )
             conn.commit()
             return cur.rowcount
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def purge_expired(self) -> int:
         return await asyncio.to_thread(self._op_purge_expired)
@@ -311,7 +341,7 @@ class SessionStore:
     def _op_try_acquire_processing(self, user_id: int) -> bool:
         """Atomically claim the per-user processing slot (sync)."""
         now = _utc_now()
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute(
                 f"INSERT OR IGNORE INTO sessions ({', '.join(_COLUMNS)}) "
@@ -324,35 +354,34 @@ class SessionStore:
             )
             conn.commit()
             return cur.rowcount == 1
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def try_acquire_processing(self, user_id: int) -> bool:
         return await asyncio.to_thread(self._op_try_acquire_processing, user_id)
 
     def _op_release_processing(self, user_id: int) -> None:
-        conn = self._connect()
+        conn = self._connection()
         try:
             conn.execute(
                 "UPDATE sessions SET processing = 0 WHERE user_id = ?",
                 (user_id,),
             )
             conn.commit()
-        finally:
-            conn.close()
+        except Exception:
+            conn.rollback()
+            raise
 
     async def release_processing(self, user_id: int) -> None:
         await asyncio.to_thread(self._op_release_processing, user_id)
 
     def _op_is_processing(self, user_id: int) -> bool:
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT processing FROM sessions WHERE user_id = ?", (user_id,)
-            ).fetchone()
-            return bool(row and row["processing"])
-        finally:
-            conn.close()
+        conn = self._connection()
+        row = conn.execute(
+            "SELECT processing FROM sessions WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return bool(row and row["processing"])
 
     async def is_processing(self, user_id: int) -> bool:
         return await asyncio.to_thread(self._op_is_processing, user_id)
@@ -362,11 +391,8 @@ class SessionStore:
         return backup_database(self._db_path, target_dir, label="sessions", retention=retention)
 
     def _op_count(self) -> int:
-        conn = self._connect()
-        try:
-            return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-        finally:
-            conn.close()
+        conn = self._connection()
+        return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
 
     async def count(self) -> int:
         return await asyncio.to_thread(self._op_count)
