@@ -247,3 +247,124 @@ def test_summary_counts(tmp_path):
     assert s["failed"] == 1
     assert s["delivered"] == 1
     assert s["total"] == 4
+
+
+# ---- Connection reuse (Fix #1: persistent thread-local connections) --------
+
+
+def test_ledger_connection_reused_across_sync_ops(tmp_path, monkeypatch):
+    """A persistent thread-local connection is reused, not opened per-operation."""
+    original_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def counting_connect(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("database"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    initial = len(calls)  # migration opens a connection
+    assert initial >= 1
+
+    lg.insert(_entry("f1"))
+    lg.count()
+    lg.by_user(1)
+    lg.summary()
+    lg.all()
+
+    # No new connections should have been opened for these operations.
+    assert len(calls) == initial
+
+
+def test_ledger_close_releases_connections(tmp_path):
+    """close() releases all connections; further use raises."""
+    lg = ReceiptLedger(tmp_path / "ledger.db")
+    lg.insert(_entry("f1"))  # creates the thread-local connection
+    lg.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        lg.count()
+
+
+# ---- Migration from old schema versions (Fix #5) --------------------------
+
+
+def _create_v1_ledger_db(path):
+    """Create a receipts ledger DB at schema version 1 (no failure_reason/delivered_at)."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript("""
+        CREATE TABLE receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            file_id TEXT UNIQUE,
+            merchant_name TEXT NOT NULL,
+            transaction_date TEXT,
+            currency TEXT NOT NULL,
+            total TEXT NOT NULL,
+            review_required INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'accepted',
+            request_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_receipts_user_id ON receipts(user_id);
+        CREATE INDEX IF NOT EXISTS idx_receipts_request_id ON receipts(request_id);
+    """)
+    conn.execute(
+        "INSERT INTO receipts (user_id, file_id, merchant_name, transaction_date, "
+        "currency, total, review_required, status, request_id, created_at) "
+        "VALUES (1, 'f1', 'Test Receipt', '2026-01-01', 'AED', '10.00', "
+        "0, 'accepted', 'req123', '2026-01-01T00:00:00+00:00')"
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+
+def _receipts_columns(db) -> list[str]:
+    """Return column names from the receipts table."""
+    conn = sqlite3.connect(str(db))
+    try:
+        return [d[1] for d in conn.execute("PRAGMA table_info('receipts')").fetchall()]
+    finally:
+        conn.close()
+
+
+def test_ledger_db_migrates_from_v1(tmp_path):
+    """A receipts DB at schema version 1 migrates to the current version.
+
+    Version 1 has no ``failure_reason`` or ``delivered_at`` columns (added in v2).
+    The migration must add them without losing existing data.
+    """
+    db_path = tmp_path / "ledger.db"
+    _create_v1_ledger_db(db_path)
+
+    # Opening with ReceiptLedger triggers _migrate().
+    lg = ReceiptLedger(db_path)
+
+    # Schema version is current.
+    assert _user_version(db_path) == 2
+
+    # Columns match a fresh DB.
+    fresh = ReceiptLedger(tmp_path / "fresh.db")
+    fresh_cols = set(_receipts_columns(tmp_path / "fresh.db"))
+    fresh.close()
+    migrated_cols = set(_receipts_columns(db_path))
+    assert migrated_cols == fresh_cols
+
+    # New columns were added.
+    assert "failure_reason" in migrated_cols
+    assert "delivered_at" in migrated_cols
+
+    # Indexes survived.
+    assert "idx_receipts_user_id" in _index_names(db_path)
+    assert "idx_receipts_request_id" in _index_names(db_path)
+
+    # Data survived the migration.
+    assert lg.count() == 1
+    row = lg.all()[0]
+    assert row["merchant_name"] == "Test Receipt"
+    assert row["total"] == Decimal("10.00")
+    assert row["request_id"] == "req123"
+    assert row["failure_reason"] is None  # added with no default -> NULL
+    assert row["delivered_at"] is None
+
+    lg.close()

@@ -58,16 +58,31 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(data)
 
 
-_SENSITIVE_PATTERNS = [
-    re.compile(r"openai_api_key[=:]?\s*[\w-]{8,}"),
-    re.compile(r"sk-[A-Za-z0-9_\-]+"),
-    re.compile(r"(?i)(password|api[_-]?key|token)\s*[=:]\s*\S+"),
+_SENSITIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # (compiled_pattern, replacement_template) — explicit per pattern.
+    # Patterns with a capture group keep the key name and redact the value;
+    # patterns without one redact the entire match.
+    #
+    # Known limitation: unquoted multi-word values (e.g. ``password = hunter 2``)
+    # only have the first token redacted (``\S+`` stops at whitespace). Quoted
+    # values (``password = "hunter 2"``) are fully redacted. Regex-based
+    # redaction is inherently limited; quoted values are the supported way to
+    # log multi-word secrets.
+    (re.compile(r"sk-[A-Za-z0-9_\-]+"), "[REDACTED]"),
+    (
+        re.compile(
+            r'(?i)(password|api[_-]?key|token)\s*[=:]\s*(?:"[^"]*"|\'[^\']*\'|\S+)'
+        ),
+        r"\1=<redacted>",
+    ),
+    # Authorization: Bearer / Basic auth headers.
+    (re.compile(r"(?i)Authorization:\s*(?:Bearer|Basic)\s+\S+"), "Authorization: [REDACTED]"),
 ]
 
 
 def redact(message: str) -> str:
-    for pat in _SENSITIVE_PATTERNS:
-        message = pat.sub(r"\1=<redacted>", message) if "password" in pat.pattern.lower() else pat.sub("[REDACTED]", message)
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        message = pattern.sub(replacement, message)
     return message
 
 
